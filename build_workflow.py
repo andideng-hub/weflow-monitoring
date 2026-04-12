@@ -278,10 +278,10 @@ for (const item of $input.all()) {
     if (allDeclined) continue;
 
     const iCalUID = ev.iCalUID || ev.id;
-    const extAccepted = external.filter(a => a.responseStatus === "accepted").length;
 
-    // Skip if no external attendee accepted — likely cancelled
-    if (extAccepted === 0) continue;
+    // Skip only if ALL external attendees declined (matches CSM reviews logic)
+    const extNotDeclined = external.filter(a => a.responseStatus !== "declined");
+    if (extNotDeclined.length === 0) continue;
 
     if (seen[iCalUID]) {
       if (!seen[iCalUID].csms.includes(calendarId)) {
@@ -292,7 +292,6 @@ for (const item of $input.all()) {
         iCalUID,
         summary: ev.summary || "(no title)",
         externalCount: external.length,
-        externalAccepted: extAccepted,
         csms: [calendarId],
       };
     }
