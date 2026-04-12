@@ -250,7 +250,7 @@ filter_dedup_code = {
     "parameters": {
         "mode": "runOnceForAllItems",
         "jsCode": """
-const INTERNAL_DOMAINS = ["hginsights.com", "hgdata.com", "trustradius.com", "madkudu.com"];
+const INTERNAL_DOMAINS = ["hginsights.com", "hgdata.com", "trustradius.com", "madkudu.com", "smoothoperator.cc"];
 const FREEMAIL_DOMAINS = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
   "aol.com", "icloud.com", "protonmail.com", "live.com", "me.com", "googlemail.com"];
 
