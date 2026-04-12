@@ -121,7 +121,8 @@ date_range_code = {
     "position": pos(300, 100),
     "parameters": {
         "jsCode": """
-// Compute yesterday's date range in Pacific Time (PDT = UTC-7, PST = UTC-8)
+// Compute date range in Pacific Time (PDT = UTC-7, PST = UTC-8)
+// Mon-Thu: check yesterday. Monday: check Friday (skip weekend).
 const nowUtc = new Date();
 
 // "Today" midnight PT in UTC = today 07:00 UTC (PDT season: Apr-Oct)
@@ -133,15 +134,31 @@ if (nowUtc.getUTCHours() < 7) {
   todayMidnightPT.setUTCDate(todayMidnightPT.getUTCDate() - 1);
 }
 
-const timeMax = todayMidnightPT.toISOString();
-const timeMin = new Date(todayMidnightPT.getTime() - 24 * 60 * 60 * 1000).toISOString();
+// Day of week: 0=Sun, 1=Mon, ..., 5=Fri, 6=Sat
+const todayPT = new Date(todayMidnightPT.getTime() - 1);
+const dayOfWeek = todayPT.getUTCDay();
 
-// Human-readable date for Slack
-const yesterdayNoon = new Date(todayMidnightPT.getTime() - 12 * 60 * 60 * 1000);
-const dateLabel = yesterdayNoon.toLocaleDateString('en-US', {
-  weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  timeZone: 'America/Los_Angeles'
-});
+// Monday: look back 3 days (Fri+Sat+Sun). Other days: look back 1 day.
+const lookbackDays = (dayOfWeek === 1) ? 3 : 1;
+
+const timeMax = todayMidnightPT.toISOString();
+const timeMin = new Date(todayMidnightPT.getTime() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+
+// Human-readable date label for Slack
+let dateLabel;
+if (lookbackDays === 3) {
+  const fri = new Date(todayMidnightPT.getTime() - 3 * 24 * 60 * 60 * 1000 + 12 * 60 * 60 * 1000);
+  dateLabel = 'Friday, ' + fri.toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric',
+    timeZone: 'America/Los_Angeles'
+  });
+} else {
+  const yesterdayNoon = new Date(todayMidnightPT.getTime() - 12 * 60 * 60 * 1000);
+  dateLabel = yesterdayNoon.toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    timeZone: 'America/Los_Angeles'
+  });
+}
 
 return [{ json: { timeMin, timeMax, dateLabel } }];
 """
@@ -250,7 +267,7 @@ filter_dedup_code = {
     "parameters": {
         "mode": "runOnceForAllItems",
         "jsCode": """
-const INTERNAL_DOMAINS = ["hginsights.com", "hgdata.com", "trustradius.com", "madkudu.com", "smoothoperator.cc"];
+const INTERNAL_DOMAINS = ["hginsights.com", "hgdata.com", "trustradius.com", "madkudu.com"];
 const FREEMAIL_DOMAINS = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
   "aol.com", "icloud.com", "protonmail.com", "live.com", "me.com", "googlemail.com"];
 
@@ -278,10 +295,10 @@ for (const item of $input.all()) {
     if (allDeclined) continue;
 
     const iCalUID = ev.iCalUID || ev.id;
+    const extAccepted = external.filter(a => a.responseStatus === "accepted").length;
 
-    // Skip only if ALL external attendees declined (matches CSM reviews logic)
-    const extNotDeclined = external.filter(a => a.responseStatus !== "declined");
-    if (extNotDeclined.length === 0) continue;
+    // Skip if no external attendee accepted — likely cancelled
+    if (extAccepted === 0) continue;
 
     if (seen[iCalUID]) {
       if (!seen[iCalUID].csms.includes(calendarId)) {
@@ -292,6 +309,7 @@ for (const item of $input.all()) {
         iCalUID,
         summary: ev.summary || "(no title)",
         externalCount: external.length,
+        externalAccepted: extAccepted,
         csms: [calendarId],
       };
     }
@@ -472,7 +490,7 @@ return [{ json: { message } }];
 # 25. Slack DM Node
 slack_dm = {
     "id": "slack_dm",
-    "name": "Slack: #weflow-daily-alert",
+    "name": "Slack DM Andi",
     "type": "n8n-nodes-base.slack",
     "typeVersion": 2.4,
     "position": pos(2400, 0),
@@ -557,7 +575,7 @@ CONNECTIONS["Transcript Check"] = {
     "main": [[{"node": "Format Slack Message", "type": "main", "index": 0}]]
 }
 CONNECTIONS["Format Slack Message"] = {
-    "main": [[{"node": "Slack: #weflow-daily-alert", "type": "main", "index": 0}]]
+    "main": [[{"node": "Slack DM Andi", "type": "main", "index": 0}]]
 }
 
 # ── Push to N8N ───────────────────────────────────────────────────────────────
