@@ -106,6 +106,7 @@ Always spot-check automated results against real data before trusting them.
 
 ## CSMs Monitored
 
+### Growth
 | Name | Calendar |
 |------|----------|
 | Debottama Mukherjee | debottama.mukherjee@hginsights.com |
@@ -116,12 +117,25 @@ Always spot-check automated results against real data before trusting them.
 | Ishant Mulani | ishant.mulani@hginsights.com |
 | Brett Castonguay | brett.castonguay@hginsights.com |
 
+### Enterprise (added Apr 17, 2026)
+| Name | Title | Calendar |
+|------|-------|----------|
+| Divyam Dewan | CSM II | divyam.dewan@hginsights.com |
+| Rani Guy | Strategic CSM | rani.guy@hginsights.com |
+| Pam Huck | Enterprise CSM | pam.huck@hginsights.com |
+| Nick Johnson | CSM II | nick.johnson@hginsights.com |
+| Rishi Khushalani | Sr Customer Solutions Engineer | rishi.khushalani@hginsights.com |
+| Andy Lim | CSM II | andy.lim@hginsights.com |
+| Riley Rogers | Enterprise CSM | riley.rogers@hginsights.com |
+| Varun Tiwari | CSM II | varun.tiwari@hginsights.com |
+| Atisha Waghela | CSM II | atisha.waghela@hginsights.com |
+
 ## Known Limitations
 
 - **Weflow-only** — doesn't check FourFour (Vitally) or Kaia (Outreach) transcripts
 - **Zoom-only** — Weflow only records Zoom meetings; non-Zoom customer calls always appear as missing
 - **PDT hardcoded** — date range assumes UTC-7 (Apr-Oct); needs UTC-8 update for Nov-Mar
-- **Growth CSMs only** — AMs and other teams not in scope yet
+- **CSMs only** — other GTM roles (AEs, BDAs, SEs beyond Rishi) not in scope
 
 ## Timeline
 

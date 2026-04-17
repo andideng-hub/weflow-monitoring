@@ -56,6 +56,7 @@ ANDI_SLACK_UID = "U09JRT0DHD2"
 SFDC_URL = "https://hgdata.my.salesforce.com"
 
 CSM_CALENDARS = [
+    # Growth CSMs
     "debottama.mukherjee@hginsights.com",
     "nandini.yamdagni@hginsights.com",
     "himani.joshi@hginsights.com",
@@ -63,6 +64,16 @@ CSM_CALENDARS = [
     "meghan.whiteman@hginsights.com",
     "ishant.mulani@hginsights.com",
     "brett.castonguay@hginsights.com",
+    # Enterprise CSMs (+ Rishi, Sr CSE)
+    "divyam.dewan@hginsights.com",
+    "rani.guy@hginsights.com",
+    "pam.huck@hginsights.com",
+    "nick.johnson@hginsights.com",
+    "rishi.khushalani@hginsights.com",
+    "andy.lim@hginsights.com",
+    "riley.rogers@hginsights.com",
+    "varun.tiwari@hginsights.com",
+    "atisha.waghela@hginsights.com",
 ]
 
 
