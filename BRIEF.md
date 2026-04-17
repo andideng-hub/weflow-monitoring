@@ -134,7 +134,6 @@ Always spot-check automated results against real data before trusting them.
 | Rani Guy | Strategic CSM | rani.guy@hginsights.com |
 | Pam Huck | Enterprise CSM | pam.huck@hginsights.com |
 | Nick Johnson | CSM II | nick.johnson@hginsights.com |
-| Rishi Khushalani | Sr Customer Solutions Engineer | rishi.khushalani@hginsights.com |
 | Andy Lim | CSM II | andy.lim@hginsights.com |
 | Riley Rogers | Enterprise CSM | riley.rogers@hginsights.com |
 | Varun Tiwari | CSM II | varun.tiwari@hginsights.com |
@@ -145,7 +144,7 @@ Always spot-check automated results against real data before trusting them.
 - **Weflow-only** — doesn't check FourFour (Vitally) or Kaia (Outreach) transcripts
 - **Zoom-only** — Weflow only records Zoom meetings; non-Zoom customer calls always appear as missing
 - **PDT hardcoded** — date range assumes UTC-7 (Apr-Oct); needs UTC-8 update for Nov-Mar
-- **CSMs only** — other GTM roles (AEs, BDAs, SEs beyond Rishi) not in scope
+- **CSMs only** — other GTM roles (AEs, BDAs, SEs) not in scope
 
 ## Timeline
 

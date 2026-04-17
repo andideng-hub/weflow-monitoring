@@ -72,7 +72,6 @@ ENT_CSMS = [
     "rani.guy@hginsights.com",
     "pam.huck@hginsights.com",
     "nick.johnson@hginsights.com",
-    "rishi.khushalani@hginsights.com",
     "andy.lim@hginsights.com",
     "riley.rogers@hginsights.com",
     "varun.tiwari@hginsights.com",
