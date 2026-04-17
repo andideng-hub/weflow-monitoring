@@ -55,7 +55,10 @@ SLACK_CRED_ID = "iBeipcH2cF7I1QiU"
 ANDI_SLACK_UID = "U09JRT0DHD2"
 SFDC_URL = "https://hgdata.my.salesforce.com"
 
-CSM_CALENDARS = [
+SHEET_ID = "1vhSMV2TcmLidUQhaCpXKQNjP_AmKirtFOYq-JhFM3W8"
+SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
+
+GROWTH_CSMS = [
     "debottama.mukherjee@hginsights.com",
     "nandini.yamdagni@hginsights.com",
     "himani.joshi@hginsights.com",
@@ -64,6 +67,17 @@ CSM_CALENDARS = [
     "ishant.mulani@hginsights.com",
     "brett.castonguay@hginsights.com",
 ]
+ENT_CSMS = [
+    "divyam.dewan@hginsights.com",
+    "rani.guy@hginsights.com",
+    "pam.huck@hginsights.com",
+    "nick.johnson@hginsights.com",
+    "andy.lim@hginsights.com",
+    "riley.rogers@hginsights.com",
+    "varun.tiwari@hginsights.com",
+    "atisha.waghela@hginsights.com",
+]
+CSM_CALENDARS = GROWTH_CSMS + ENT_CSMS
 
 
 def pos(x, y):
@@ -304,11 +318,15 @@ for (const item of $input.all()) {
         seen[iCalUID].csms.push(calendarId);
       }
     } else {
+      const firstExt = external[0] || {};
       seen[iCalUID] = {
         iCalUID,
+        instanceId: ev.id,  // unique per recurrence instance; used for sheet dedup
         summary: ev.summary || "(no title)",
         externalCount: external.length,
         csms: [calendarId],
+        startIso: ev.start && (ev.start.dateTime || ev.start.date) || "",
+        customerDomain: getDomain(firstExt.email || ""),
       };
     }
   }
@@ -403,84 +421,168 @@ transcript_check_code = {
     "position": pos(2000, -50),
     "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": """
-// Build lookup: iCalUID -> has transcript
+        "jsCode": f"""
+// Build lookup: iCalUID -> {{recordingId, hasTranscript}}
 const sfdc = $input.all().map(i => i.json);
-const transcriptMap = {};
-for (const rec of sfdc) {
+const sfMap = {{}};
+for (const rec of sfdc) {{
   const records = rec.records || [];
-  for (const r of records) {
+  for (const r of records) {{
     const eid = r.Weflow__EventId__c;
     const hasTranscript = r.Weflow__Transcript__c !== null &&
                           r.Weflow__Transcript__c !== undefined &&
                           r.Weflow__Transcript__c !== "";
-    transcriptMap[eid] = hasTranscript;
-  }
-}
+    sfMap[eid] = {{ recordingId: r.Id || "", hasTranscript }};
+  }}
+}}
 
-// Get meetings from Filter + Dedup node
+const GROWTH = new Set({json.dumps(GROWTH_CSMS)});
+const ENT = new Set({json.dumps(ENT_CSMS)});
+function teamOf(email) {{
+  if (GROWTH.has(email)) return "Growth";
+  if (ENT.has(email)) return "ENT";
+  return "";
+}}
+function teamLabel(csms) {{
+  const teams = new Set(csms.map(teamOf).filter(Boolean));
+  if (teams.size === 0) return "";
+  if (teams.size === 1) return [...teams][0];
+  return "Mixed";
+}}
+function nameFromEmail(email) {{
+  return email.split('@')[0].split('.').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+}}
+function ptDateTime(iso) {{
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString('en-CA', {{
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  }}).replace(',', '');
+}}
+
+const alertDate = new Date().toLocaleDateString('en-CA', {{ timeZone: 'America/Los_Angeles' }});
 const meetings = $('Filter + Dedup').all().map(i => i.json);
 
-const gaps = [];
-const covered = [];
+let gapCount = 0, coveredCount = 0;
+const sheetValues = [];
 
-for (const m of meetings) {
-  // Format CSM names from email
-  const csmNames = m.csms.map(e => {
-    const parts = e.split('@')[0].split('.');
-    return parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
-  }).join(', ');
+for (const m of meetings) {{
+  const sf = sfMap[m.iCalUID] || {{ recordingId: "", hasTranscript: false }};
+  const status = sf.hasTranscript ? "✅ Covered" : "❌ Gap";
+  if (sf.hasTranscript) coveredCount++; else gapCount++;
 
-  if (transcriptMap[m.iCalUID] === true) {
-    const firstNames = m.csms.map(e => e.split('.')[0])
-      .map(n => n.charAt(0).toUpperCase() + n.slice(1));
-    covered.push(m.summary + ' (' + firstNames.join('+') + ')');
-  } else {
-    const countStr = m.externalCount === 1
-      ? '1 customer attendee'
-      : m.externalCount + ' customer attendees';
-    gaps.push('\\u2022 ' + m.summary + ' (' + csmNames + ') — ' + countStr);
-  }
-}
+  const csmNames = m.csms.map(nameFromEmail).join(", ");
+  sheetValues.push([
+    alertDate,
+    ptDateTime(m.startIso),
+    csmNames,
+    teamLabel(m.csms),
+    status,
+    m.summary,
+    m.customerDomain || "",
+    m.externalCount,
+    sf.recordingId,
+    m.instanceId,  // unique per recurrence instance
+  ]);
+}}
 
-return [{ json: { gaps, covered, gapCount: gaps.length } }];
+return [{{ json: {{ sheetValues, gapCount, coveredCount, totalMeetings: meetings.length }} }}];
 """,
     },
 }
 
-# 24. Format Slack Message Code Node
+# 23b. Dedup Rows — skip meetings already logged in sheet (by gcal_event_id = instance ID)
+dedup_rows_code = {
+    "id": "dedup_rows",
+    "name": "Dedup Rows",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(2200, -150),
+    "parameters": {
+        "jsCode": f"""
+const sheetValues = $json.sheetValues || [];
+if (sheetValues.length === 0) return [{{ json: {{ sheetValues: [], skipped: 0, appended: 0 }} }}];
+
+const token = $('Refresh Google Token').first().json.access_token;
+const existingResp = await this.helpers.httpRequest({{
+  method: 'GET',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!J:J',
+  headers: {{ Authorization: 'Bearer ' + token }},
+  json: true,
+}});
+
+const existing = new Set();
+for (const row of (existingResp.values || []).slice(1)) {{
+  if (row && row[0]) existing.add(row[0]);
+}}
+
+const newValues = sheetValues.filter(r => !existing.has(r[9]));  // col 9 = gcal_event_id
+return [{{ json: {{ sheetValues: newValues, skipped: sheetValues.length - newValues.length, appended: newValues.length }} }}];
+""",
+    },
+}
+
+# 23c. Append to Google Sheet via HTTP (only new rows)
+sheet_append = {
+    "id": "sheet_append",
+    "name": "Append to Sheet",
+    "type": "n8n-nodes-base.httpRequest",
+    "typeVersion": 4.2,
+    "position": pos(2400, -150),
+    "parameters": {
+        "method": "POST",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:J:append",
+        "authentication": "none",
+        "sendHeaders": True,
+        "headerParameters": {
+            "parameters": [
+                {"name": "Authorization", "value": "=Bearer {{ $('Refresh Google Token').first().json.access_token }}"},
+                {"name": "Content-Type", "value": "application/json"},
+            ]
+        },
+        "sendQuery": True,
+        "queryParameters": {
+            "parameters": [
+                {"name": "valueInputOption", "value": "RAW"},
+                {"name": "insertDataOption", "value": "INSERT_ROWS"},
+            ]
+        },
+        "sendBody": True,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ values: $json.sheetValues }) }}",
+        "options": {},
+    },
+}
+
+# 24. Format Slack Message Code Node (terse: counts + sheet link)
 slack_format_code = {
     "id": "slack_format",
     "name": "Format Slack Message",
     "type": "n8n-nodes-base.code",
     "typeVersion": 2,
-    "position": pos(2200, 0),
+    "position": pos(2400, 0),
     "parameters": {
-        "jsCode": """
+        "jsCode": f"""
 const dateLabel = $('Compute Date Range').first().json.dateLabel;
+const SHEET = '{SHEET_URL}';
 
-// Check if we came from the "no meetings" path
 const buildSoql = $('Build SOQL').first().json;
-if (buildSoql.noMeetings) {
-  return [{ json: {
-    message: '\\u2705 *Weflow Transcript Report — ' + dateLabel + '*\\nNo CSM customer meetings found for yesterday.'
-  }}];
-}
+if (buildSoql.noMeetings) {{
+  return [{{ json: {{
+    message: '📋 *Weflow Transcript Report — ' + dateLabel + '*\\nNo CSM customer meetings found.'
+  }}}}];
+}}
 
-const { gaps, covered, gapCount } = $('Transcript Check').first().json;
+const tc = $('Transcript Check').first().json;
+const line = '❌ ' + tc.gapCount + ' missing | ✅ ' + tc.coveredCount + ' recorded';
+const message = '📋 *Weflow Transcript Report — ' + dateLabel + '*\\n' +
+  line + '\\n' +
+  '🔗 <' + SHEET + '|Details in Google Sheet>';
 
-let message;
-if (gapCount === 0) {
-  message = '\\u2705 *Weflow Transcript Report — ' + dateLabel + '*\\nAll CSM customer meetings from yesterday have transcripts.';
-} else {
-  const gapList = gaps.join('\\n');
-  const coveredSummary = covered.length > 0
-    ? '\\n\\n\\u2705 *Have transcripts (' + covered.length + '):* ' + covered.join(', ')
-    : '';
-  message = '\\ud83d\\udccb *Weflow Transcript Report — ' + dateLabel + '*\\n\\nMissing Weflow transcripts from yesterday\\'s CSM meetings:\\n\\n' + gapList + coveredSummary;
-}
-
-return [{ json: { message } }];
+return [{{ json: {{ message }} }}];
 """,
     },
 }
@@ -491,7 +593,7 @@ slack_dm = {
     "name": "Slack: #weflow-daily-alert",
     "type": "n8n-nodes-base.slack",
     "typeVersion": 2.4,
-    "position": pos(2400, 0),
+    "position": pos(2600, 0),
     "credentials": {
         "slackApi": {"id": SLACK_CRED_ID, "name": "Andi Slack Bot"}
     },
@@ -519,6 +621,8 @@ NODES = [
     if_has_meetings,
     sfdc_query,
     transcript_check_code,
+    dedup_rows_code,
+    sheet_append,
     slack_format_code,
     slack_dm,
 ]
@@ -569,9 +673,17 @@ CONNECTIONS["Has Meetings?"] = {
 CONNECTIONS["SFDC Weflow Query"] = {
     "main": [[{"node": "Transcript Check", "type": "main", "index": 0}]]
 }
+# Transcript Check fans out: dedup→sheet append + slack format (parallel)
 CONNECTIONS["Transcript Check"] = {
-    "main": [[{"node": "Format Slack Message", "type": "main", "index": 0}]]
+    "main": [[
+        {"node": "Dedup Rows", "type": "main", "index": 0},
+        {"node": "Format Slack Message", "type": "main", "index": 0},
+    ]]
 }
+CONNECTIONS["Dedup Rows"] = {
+    "main": [[{"node": "Append to Sheet", "type": "main", "index": 0}]]
+}
+CONNECTIONS["Append to Sheet"] = {"main": [[]]}
 CONNECTIONS["Format Slack Message"] = {
     "main": [[{"node": "Slack: #weflow-daily-alert", "type": "main", "index": 0}]]
 }

@@ -24,13 +24,23 @@ The approach: compare what *should* have been recorded (GCal meetings with exter
 ### Data Flow
 
 ```
-GCal (7 CSM calendars)
+GCal (16 CSM calendars)
   → Filter to customer-facing meetings (corporate external attendees)
   → Deduplicate shared meetings by iCalUID
   → Match against SFDC Weflow__WeflowVideoRecording__c
-  → Flag meetings with no transcript
-  → Slack alert at 7 AM PT
+  → Append one row per (meeting × CSM) to Google Sheet cache
+  → Slack alert at 7 AM PT (terse: counts + sheet link)
 ```
+
+### Output Model: Sheet as Detail, Slack as Summary
+
+Slack carries only the daily totals (`X missing | Y recorded`) plus a hyperlink to the sheet. All per-meeting detail — CSM, title, customer domain, shared attendees, Weflow recording ID — lives in the "Weflow Transcript Log" Google Sheet (shared Customers drive). Ops filters the sheet by date, CSM, team, or status to drill in.
+
+**Why:** With 16 CSMs, per-line Slack output runs dozens of bullets and becomes unreadable. The sheet makes every column filterable without flooding the channel.
+
+**Sheet columns (10):** `alert_date`, `meeting_start_pt`, `csms` (comma-separated names), `team` (Growth / ENT / Mixed), `status` (✅ Covered / ❌ Gap), `meeting_title`, `customer_domain`, `external_attendees`, `weflow_recording_id`, `gcal_event_id`.
+
+**Row granularity:** one row per unique meeting. Shared meetings list both CSMs in the `csms` column (comma-separated) so counts aren't inflated. Filter `csms` with a "text contains" match to find meetings for one CSM.
 
 ### What Counts as "Customer-Facing"
 
@@ -106,6 +116,7 @@ Always spot-check automated results against real data before trusting them.
 
 ## CSMs Monitored
 
+### Growth
 | Name | Calendar |
 |------|----------|
 | Debottama Mukherjee | debottama.mukherjee@hginsights.com |
@@ -116,12 +127,24 @@ Always spot-check automated results against real data before trusting them.
 | Ishant Mulani | ishant.mulani@hginsights.com |
 | Brett Castonguay | brett.castonguay@hginsights.com |
 
+### Enterprise (added Apr 17, 2026)
+| Name | Title | Calendar |
+|------|-------|----------|
+| Divyam Dewan | CSM II | divyam.dewan@hginsights.com |
+| Rani Guy | Strategic CSM | rani.guy@hginsights.com |
+| Pam Huck | Enterprise CSM | pam.huck@hginsights.com |
+| Nick Johnson | CSM II | nick.johnson@hginsights.com |
+| Andy Lim | CSM II | andy.lim@hginsights.com |
+| Riley Rogers | Enterprise CSM | riley.rogers@hginsights.com |
+| Varun Tiwari | CSM II | varun.tiwari@hginsights.com |
+| Atisha Waghela | CSM II | atisha.waghela@hginsights.com |
+
 ## Known Limitations
 
 - **Weflow-only** — doesn't check FourFour (Vitally) or Kaia (Outreach) transcripts
 - **Zoom-only** — Weflow only records Zoom meetings; non-Zoom customer calls always appear as missing
 - **PDT hardcoded** — date range assumes UTC-7 (Apr-Oct); needs UTC-8 update for Nov-Mar
-- **Growth CSMs only** — AMs and other teams not in scope yet
+- **CSMs only** — other GTM roles (AEs, BDAs, SEs) not in scope
 
 ## Timeline
 
