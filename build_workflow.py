@@ -445,6 +445,12 @@ function teamOf(email) {{
   if (ENT.has(email)) return "ENT";
   return "";
 }}
+function teamLabel(csms) {{
+  const teams = new Set(csms.map(teamOf).filter(Boolean));
+  if (teams.size === 0) return "";
+  if (teams.size === 1) return [...teams][0];
+  return "Mixed";
+}}
 function nameFromEmail(email) {{
   return email.split('@')[0].split('.').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
 }}
@@ -470,24 +476,19 @@ for (const m of meetings) {{
   const status = sf.hasTranscript ? "✅ Covered" : "❌ Gap";
   if (sf.hasTranscript) coveredCount++; else gapCount++;
 
-  const startPt = ptDateTime(m.startIso);
-  for (const csmEmail of m.csms) {{
-    const others = m.csms.filter(e => e !== csmEmail).map(nameFromEmail).join(", ");
-    sheetValues.push([
-      alertDate,
-      startPt,
-      nameFromEmail(csmEmail),
-      csmEmail,
-      teamOf(csmEmail),
-      status,
-      m.summary,
-      m.customerDomain || "",
-      m.externalCount,
-      others,
-      sf.recordingId,
-      m.iCalUID,
-    ]);
-  }}
+  const csmNames = m.csms.map(nameFromEmail).join(", ");
+  sheetValues.push([
+    alertDate,
+    ptDateTime(m.startIso),
+    csmNames,
+    teamLabel(m.csms),
+    status,
+    m.summary,
+    m.customerDomain || "",
+    m.externalCount,
+    sf.recordingId,
+    m.iCalUID,
+  ]);
 }}
 
 return [{{ json: {{ sheetValues, gapCount, coveredCount, totalMeetings: meetings.length }} }}];
@@ -504,7 +505,7 @@ sheet_append = {
     "position": pos(2200, -150),
     "parameters": {
         "method": "POST",
-        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:L:append",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:J:append",
         "authentication": "none",
         "sendHeaders": True,
         "headerParameters": {

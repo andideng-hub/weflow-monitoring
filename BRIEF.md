@@ -38,9 +38,9 @@ Slack carries only the daily totals (`X missing | Y recorded`) plus a hyperlink 
 
 **Why:** With 16 CSMs, per-line Slack output runs dozens of bullets and becomes unreadable. The sheet makes every column filterable without flooding the channel.
 
-**Sheet columns (12):** `alert_date`, `meeting_start_pt`, `csm_name`, `csm_email`, `team` (Growth/ENT), `status` (✅ Covered / ❌ Gap), `meeting_title`, `customer_domain`, `external_attendees`, `shared_with`, `weflow_recording_id`, `gcal_event_id`.
+**Sheet columns (10):** `alert_date`, `meeting_start_pt`, `csms` (comma-separated names), `team` (Growth / ENT / Mixed), `status` (✅ Covered / ❌ Gap), `meeting_title`, `customer_domain`, `external_attendees`, `weflow_recording_id`, `gcal_event_id`.
 
-**Row granularity:** one row per (meeting × CSM). Shared meetings produce one row per attending CSM with `shared_with` listing the others — so filtering by CSM always works, and `gcal_event_id` lets ops dedup to unique meetings.
+**Row granularity:** one row per unique meeting. Shared meetings list both CSMs in the `csms` column (comma-separated) so counts aren't inflated. Filter `csms` with a "text contains" match to find meetings for one CSM.
 
 ### What Counts as "Customer-Facing"
 
