@@ -24,13 +24,23 @@ The approach: compare what *should* have been recorded (GCal meetings with exter
 ### Data Flow
 
 ```
-GCal (7 CSM calendars)
+GCal (16 CSM calendars)
   → Filter to customer-facing meetings (corporate external attendees)
   → Deduplicate shared meetings by iCalUID
   → Match against SFDC Weflow__WeflowVideoRecording__c
-  → Flag meetings with no transcript
-  → Slack alert at 7 AM PT
+  → Append one row per (meeting × CSM) to Google Sheet cache
+  → Slack alert at 7 AM PT (terse: counts + sheet link)
 ```
+
+### Output Model: Sheet as Detail, Slack as Summary
+
+Slack carries only the daily totals (`X missing | Y recorded`) plus a hyperlink to the sheet. All per-meeting detail — CSM, title, customer domain, shared attendees, Weflow recording ID — lives in the "Weflow Transcript Log" Google Sheet (shared Customers drive). Ops filters the sheet by date, CSM, team, or status to drill in.
+
+**Why:** With 16 CSMs, per-line Slack output runs dozens of bullets and becomes unreadable. The sheet makes every column filterable without flooding the channel.
+
+**Sheet columns (12):** `alert_date`, `meeting_start_pt`, `csm_name`, `csm_email`, `team` (Growth/ENT), `status` (✅ Covered / ❌ Gap), `meeting_title`, `customer_domain`, `external_attendees`, `shared_with`, `weflow_recording_id`, `gcal_event_id`.
+
+**Row granularity:** one row per (meeting × CSM). Shared meetings produce one row per attending CSM with `shared_with` listing the others — so filtering by CSM always works, and `gcal_event_id` lets ops dedup to unique meetings.
 
 ### What Counts as "Customer-Facing"
 
