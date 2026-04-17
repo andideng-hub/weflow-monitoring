@@ -323,6 +323,7 @@ for (const item of $input.all()) {
       const firstExt = external[0] || {};
       seen[iCalUID] = {
         iCalUID,
+        instanceId: ev.id,  // unique per recurrence instance; used for sheet dedup
         summary: ev.summary || "(no title)",
         externalCount: external.length,
         externalAccepted: extAccepted,
@@ -487,7 +488,7 @@ for (const m of meetings) {{
     m.customerDomain || "",
     m.externalCount,
     sf.recordingId,
-    m.iCalUID,
+    m.instanceId,  // unique per recurrence instance
   ]);
 }}
 
@@ -496,13 +497,44 @@ return [{{ json: {{ sheetValues, gapCount, coveredCount, totalMeetings: meetings
     },
 }
 
-# 23b. Append to Google Sheet via HTTP
+# 23b. Dedup Rows — skip meetings already logged in sheet (by gcal_event_id = instance ID)
+dedup_rows_code = {
+    "id": "dedup_rows",
+    "name": "Dedup Rows",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(2200, -150),
+    "parameters": {
+        "jsCode": f"""
+const sheetValues = $json.sheetValues || [];
+if (sheetValues.length === 0) return [{{ json: {{ sheetValues: [], skipped: 0, appended: 0 }} }}];
+
+const token = $('Refresh Google Token').first().json.access_token;
+const existingResp = await this.helpers.httpRequest({{
+  method: 'GET',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!J:J',
+  headers: {{ Authorization: 'Bearer ' + token }},
+  json: true,
+}});
+
+const existing = new Set();
+for (const row of (existingResp.values || []).slice(1)) {{
+  if (row && row[0]) existing.add(row[0]);
+}}
+
+const newValues = sheetValues.filter(r => !existing.has(r[9]));  // col 9 = gcal_event_id
+return [{{ json: {{ sheetValues: newValues, skipped: sheetValues.length - newValues.length, appended: newValues.length }} }}];
+""",
+    },
+}
+
+# 23c. Append to Google Sheet via HTTP (only new rows)
 sheet_append = {
     "id": "sheet_append",
     "name": "Append to Sheet",
     "type": "n8n-nodes-base.httpRequest",
     "typeVersion": 4.2,
-    "position": pos(2200, -150),
+    "position": pos(2400, -150),
     "parameters": {
         "method": "POST",
         "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:J:append",
@@ -592,6 +624,7 @@ NODES = [
     if_has_meetings,
     sfdc_query,
     transcript_check_code,
+    dedup_rows_code,
     sheet_append,
     slack_format_code,
     slack_dm,
@@ -643,12 +676,15 @@ CONNECTIONS["Has Meetings?"] = {
 CONNECTIONS["SFDC Weflow Query"] = {
     "main": [[{"node": "Transcript Check", "type": "main", "index": 0}]]
 }
-# Transcript Check fans out: sheet append + slack format (parallel)
+# Transcript Check fans out: dedup→sheet append + slack format (parallel)
 CONNECTIONS["Transcript Check"] = {
     "main": [[
-        {"node": "Append to Sheet", "type": "main", "index": 0},
+        {"node": "Dedup Rows", "type": "main", "index": 0},
         {"node": "Format Slack Message", "type": "main", "index": 0},
     ]]
+}
+CONNECTIONS["Dedup Rows"] = {
+    "main": [[{"node": "Append to Sheet", "type": "main", "index": 0}]]
 }
 CONNECTIONS["Append to Sheet"] = {"main": [[]]}
 CONNECTIONS["Format Slack Message"] = {
