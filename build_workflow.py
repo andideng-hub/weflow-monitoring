@@ -58,6 +58,9 @@ SFDC_URL = "https://hgdata.my.salesforce.com"
 SHEET_ID = "1vhSMV2TcmLidUQhaCpXKQNjP_AmKirtFOYq-JhFM3W8"
 SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
 
+# Weflow Issue Log — RevOps-facing triage queue. Gap rows appended here daily.
+ISSUE_LOG_SHEET_ID = "1rmPepjRWBPDFXYzSdFLasxdPcnp8yPa7N2guS6im-B0"
+
 GROWTH_CSMS = [
     "debottama.mukherjee@hginsights.com",
     "nandini.yamdagni@hginsights.com",
@@ -575,6 +578,62 @@ sheet_append = {
     },
 }
 
+# 23d. Build Issue Log rows — filter to gaps only, map to Issue Log schema
+build_issue_log_code = {
+    "id": "build_issue_log",
+    "name": "Build Issue Log Rows",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(2200, -300),
+    "parameters": {
+        "jsCode": """
+const sheetValues = $('Transcript Check').first().json.sheetValues || [];
+const gaps = sheetValues.filter(r => r[4] === "\u274c Gap");
+if (gaps.length === 0) return [];
+const issueRows = gaps.map(r => [
+  "",                        // Issue — blank for ops to fill
+  "Open",                    // status
+  r[5],                      // Meeting Title (= summary)
+  r[2],                      // CSM names
+  r[1].split(" ")[0],        // Meeting Date (date portion of ptDateTime)
+]);
+return [{ json: { issueRows, count: issueRows.length } }];
+""",
+    },
+}
+
+# 23e. Append to Issue Log sheet (INSERT_ROWS so mid-sheet deletions don't cause overwrites)
+issue_log_append = {
+    "id": "issue_log_append",
+    "name": "Append to Issue Log",
+    "type": "n8n-nodes-base.httpRequest",
+    "typeVersion": 4.2,
+    "position": pos(2400, -300),
+    "parameters": {
+        "method": "POST",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:E:append",
+        "authentication": "none",
+        "sendHeaders": True,
+        "headerParameters": {
+            "parameters": [
+                {"name": "Authorization", "value": "=Bearer {{ $('Refresh Google Token').first().json.access_token }}"},
+                {"name": "Content-Type", "value": "application/json"},
+            ]
+        },
+        "sendQuery": True,
+        "queryParameters": {
+            "parameters": [
+                {"name": "valueInputOption", "value": "USER_ENTERED"},
+                {"name": "insertDataOption", "value": "INSERT_ROWS"},
+            ]
+        },
+        "sendBody": True,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ values: $json.issueRows }) }}",
+        "options": {},
+    },
+}
+
 # 24. Format Slack Message Code Node (terse: counts + sheet link)
 slack_format_code = {
     "id": "slack_format",
@@ -741,6 +800,8 @@ NODES = [
     transcript_check_code,
     dedup_rows_code,
     sheet_append,
+    build_issue_log_code,
+    issue_log_append,
     slack_format_code,
     slack_dm,
 ]
@@ -806,17 +867,22 @@ CONNECTIONS["Has Meetings?"] = {
 CONNECTIONS["SFDC Weflow Query"] = {
     "main": [[{"node": "Transcript Check", "type": "main", "index": 0}]]
 }
-# Transcript Check fans out: dedup→sheet append + slack format (parallel)
+# Transcript Check fans out: dedup→sheet append + slack format + issue log funnel (parallel)
 CONNECTIONS["Transcript Check"] = {
     "main": [[
         {"node": "Dedup Rows", "type": "main", "index": 0},
         {"node": "Format Slack Message", "type": "main", "index": 0},
+        {"node": "Build Issue Log Rows", "type": "main", "index": 0},
     ]]
 }
 CONNECTIONS["Dedup Rows"] = {
     "main": [[{"node": "Append to Sheet", "type": "main", "index": 0}]]
 }
 CONNECTIONS["Append to Sheet"] = {"main": [[]]}
+CONNECTIONS["Build Issue Log Rows"] = {
+    "main": [[{"node": "Append to Issue Log", "type": "main", "index": 0}]]
+}
+CONNECTIONS["Append to Issue Log"] = {"main": [[]]}
 CONNECTIONS["Format Slack Message"] = {
     "main": [[{"node": "Slack: #weflow-daily-alert", "type": "main", "index": 0}]]
 }
