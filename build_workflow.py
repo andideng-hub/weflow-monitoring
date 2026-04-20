@@ -576,14 +576,42 @@ function isExternal(email) {
 
 const seen = {};
 
+// Filter logic aligned with csm-weekly-review (single source of truth for
+// "is this a meeting we care about?"):
+//   - exclude gmail/yahoo/etc. addresses that share a prefix with an
+//     internal attendee (e.g. someone@gmail.com where someone@hginsights.com
+//     is also on the invite — personal alias, not a real external)
+//   - skip the meeting entirely if the CSM themselves declined
+//   - skip if all externals declined (no-show). `needsAction` is kept as a
+//     legitimate pending invite rather than treated as no-show.
 for (const item of $input.all()) {
   const calendarId = item.json.calendarId;
   const events = item.json.items || [];
 
   for (const ev of events) {
     const attendees = ev.attendees || [];
-    const external = attendees.filter(a => isExternal(a.email || ""));
+
+    // Internal attendee name prefixes (for gmail-match exclusion)
+    const internalPrefixes = new Set(
+      attendees
+        .filter(a => a.email && !isExternal(a.email))
+        .map(a => a.email.split("@")[0].toLowerCase().replace(/\\./g, ""))
+    );
+
+    const external = attendees.filter(a => {
+      if (!isExternal(a.email || "")) return false;
+      const prefix = (a.email || "").split("@")[0].toLowerCase().replace(/\\./g, "");
+      return !internalPrefixes.has(prefix);
+    });
     if (external.length === 0) continue;
+
+    // Skip if the CSM (calendar owner) declined — meeting didn't happen on their side
+    const csmAtt = attendees.find(a => a.email === calendarId);
+    if (csmAtt && csmAtt.responseStatus === "declined") continue;
+
+    // Skip if all externals declined (effective no-show)
+    const nonDeclined = external.filter(a => a.responseStatus !== "declined");
+    if (nonDeclined.length === 0) continue;
 
     const iCalUID = ev.iCalUID || ev.id;
 
@@ -595,7 +623,7 @@ for (const item of $input.all()) {
       const firstExt = external[0] || {};
       seen[iCalUID] = {
         iCalUID,
-        instanceId: ev.id,  // unique per recurrence instance; used for sheet dedup
+        instanceId: ev.id,
         summary: ev.summary || "(no title)",
         externalCount: external.length,
         csms: [calendarId],
@@ -748,13 +776,9 @@ for (const m of meetings) {{
   const sf = sfMap[m.iCalUID] || {{ recordingId: "", hasTranscript: false }};
 
   // Transcript-first: if Weflow recorded it, the meeting happened. Period.
-  // Only fall back to attendee status when no transcript exists.
-  if (!sf.hasTranscript) {{
-    const responded = (m.externalResponses || []).filter(
-      s => s !== "declined" && s !== "needsAction"
-    );
-    if (responded.length === 0) {{ skippedCount++; continue; }}
-  }}
+  // Aligned with csm-weekly-review: needsAction is kept as legitimate pending
+  // (not treated as no-show). Filter + Dedup already dropped all-declined +
+  // csm-declined meetings, so no further RSVP gating needed here.
 
   const status = sf.hasTranscript ? "✅ Covered" : "❌ Gap";
   if (sf.hasTranscript) coveredCount++; else gapCount++;
