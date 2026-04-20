@@ -453,6 +453,175 @@ try {{
     },
 }
 
+# 4g. Retry: Cleanup No-shows — parallel to retry, deletes stale ❌ Gap rows
+# that are confirmed no-shows per current GCal state. Mirrors csm-weekly-review's
+# Path 4 lifecycle cleanup so ops only sees real recording gaps.
+retry_cleanup_noshows = {
+    "id": "retry_cleanup_noshows",
+    "name": "Retry: Cleanup No-shows",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(880, 560),
+    "parameters": {
+        "jsCode": f"""
+try {{
+  const token = $('Refresh Google Token').first().json.access_token;
+
+  // 1. Read main sheet
+  const mainResp = await this.helpers.httpRequest({{
+    method: 'GET',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
+    headers: {{ Authorization: 'Bearer ' + token }},
+    json: true,
+  }});
+  const mainRows = mainResp.values || [];
+
+  // 2. Filter: ❌ Gap rows whose meeting ended >25h ago (1h meeting + 24h guard)
+  // Process regardless of alert_date age so we catch stragglers from past runs.
+  const nowMs = Date.now();
+  const candidates = [];
+  for (let i = 1; i < mainRows.length; i++) {{
+    const r = mainRows[i];
+    if (!r || r.length < 11) continue;
+    const status = r[4] || '';
+    if (!status.includes('Gap')) continue;
+    const meetingStartPt = r[1] || '';  // "YYYY-MM-DD HH:MM"
+    if (!meetingStartPt) continue;
+    // Parse as PT then convert to UTC by adding 7h (PDT offset)
+    const dtStr = meetingStartPt.replace(' ', 'T') + ':00';
+    const localMs = Date.parse(dtStr);
+    if (isNaN(localMs)) continue;
+    const startMs = localMs + 7 * 3600000;  // PDT → UTC approx
+    if ((nowMs - startMs) < 25 * 3600000) continue;  // 24h guard + 1h meeting
+    const csms = (r[2] || '').split(',').map(s => s.trim()).filter(Boolean);
+    const firstCsmName = csms[0] || '';
+    const instanceId = r[9] || '';
+    const iCalUID = r[10] || '';
+    if (!instanceId || !iCalUID) continue;
+    candidates.push({{
+      rowIdx: i + 1,
+      iCalUID,
+      instanceId,
+      firstCsmName,
+      csms,
+      title: r[5] || '',
+      meetingDate: meetingStartPt.split(' ')[0],
+      startMs,
+    }});
+  }}
+  if (candidates.length === 0) {{
+    return [{{ json: {{ cleanedCount: 0, note: 'no aged gap rows to check', error: '' }} }}];
+  }}
+
+  // 3. For each candidate, query its CSM calendar for current event state
+  // Name-to-email lookup from this file's CSM_CALENDARS list
+  const EMAIL_BY_NAME = """ + json.dumps({
+    email.split(".")[0].title() + " " + email.split(".")[1].split("@")[0].title(): email
+    for email in CSM_CALENDARS
+  }) + f""";
+
+  const toDelete = [];  // [{{rowIdx, title, csms, meetingDate}}]
+  for (const c of candidates) {{
+    const email = EMAIL_BY_NAME[c.firstCsmName];
+    if (!email) continue;  // name lookup failed, skip to be safe
+    const windowStart = new Date(c.startMs - 2 * 3600000).toISOString();
+    const windowEnd = new Date(c.startMs + 4 * 3600000).toISOString();
+    let noShow = false;
+    try {{
+      const u = 'https://www.googleapis.com/calendar/v3/calendars/' +
+        encodeURIComponent(email) +
+        '/events?timeMin=' + encodeURIComponent(windowStart) +
+        '&timeMax=' + encodeURIComponent(windowEnd) +
+        '&singleEvents=true&showDeleted=true';
+      const r = await this.helpers.httpRequest({{
+        method: 'GET', url: u,
+        headers: {{ Authorization: 'Bearer ' + token }},
+        json: true,
+      }});
+      const event = (r.items || []).find(e => e.iCalUID === c.iCalUID || e.id === c.instanceId);
+      if (!event || event.status === 'cancelled') {{
+        noShow = true;
+      }} else {{
+        // Check if any external has committed (accepted/tentative)
+        const INTERNAL = {json.dumps(FILTER_CONSTANTS["INTERNAL_DOMAINS"])};
+        const FREEMAIL = {json.dumps(FILTER_CONSTANTS["FREEMAIL_DOMAINS"])};
+        const externals = (event.attendees || []).filter(a => {{
+          const d = (a.email || '').split('@')[1] || '';
+          return d && !INTERNAL.includes(d) && !FREEMAIL.includes(d);
+        }});
+        const hasCommit = externals.some(a =>
+          a.responseStatus === 'accepted' || a.responseStatus === 'tentative'
+        );
+        if (!hasCommit) noShow = true;
+      }}
+    }} catch (e) {{
+      // GCal query failed — skip this row, don't risk false-delete
+      continue;
+    }}
+    if (noShow) toDelete.push(c);
+  }}
+  if (toDelete.length === 0) {{
+    return [{{ json: {{ cleanedCount: 0, note: 'no no-shows found among aged gaps', error: '' }} }}];
+  }}
+
+  // 4. Delete main sheet rows (bottom-up so indices stay valid)
+  toDelete.sort((a, b) => b.rowIdx - a.rowIdx);
+  for (const d of toDelete) {{
+    await this.helpers.httpRequest({{
+      method: 'POST',
+      url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}:batchUpdate',
+      headers: {{ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }},
+      json: true,
+      body: {{ requests: [{{ deleteDimension: {{ range: {{ sheetId: 0, dimension: 'ROWS', startIndex: d.rowIdx - 1, endIndex: d.rowIdx }} }} }}] }},
+    }});
+  }}
+
+  // 5. Delete matching Issue Log rows — match by (title, csms, date), B1 key
+  const ilResp = await this.helpers.httpRequest({{
+    method: 'GET',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:E',
+    headers: {{ Authorization: 'Bearer ' + token }},
+    json: true,
+  }});
+  const ilRows = ilResp.values || [];
+  const keys = new Set(toDelete.map(d =>
+    d.title + '|' + d.csms.join(', ') + '|' + d.meetingDate
+  ));
+  const ilToDelete = [];
+  for (let i = 1; i < ilRows.length; i++) {{
+    const r = ilRows[i];
+    if (!r) continue;
+    const key = (r[2] || '') + '|' + (r[3] || '') + '|' + (r[4] || '');
+    if (keys.has(key)) ilToDelete.push(i + 1);
+  }}
+  ilToDelete.sort((a, b) => b - a);
+  for (const row of ilToDelete) {{
+    await this.helpers.httpRequest({{
+      method: 'POST',
+      url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}:batchUpdate',
+      headers: {{ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }},
+      json: true,
+      body: {{ requests: [{{ deleteDimension: {{ range: {{ sheetId: 0, dimension: 'ROWS', startIndex: row - 1, endIndex: row }} }} }}] }},
+    }});
+  }}
+
+  return [{{ json: {{
+    cleanedCount: toDelete.length,
+    issueLogRowsDeleted: ilToDelete.length,
+    deletedRows: toDelete.map(d => ({{ title: d.title, csms: d.csms, date: d.meetingDate }})),
+    error: '',
+  }} }}];
+}} catch (err) {{
+  return [{{ json: {{
+    cleanedCount: 0,
+    error: (err && err.message) ? err.message.slice(0, 500) : String(err).slice(0, 500),
+    stack: (err && err.stack) ? err.stack.split('\\n').slice(0, 3).join(' | ') : '',
+  }} }}];
+}}
+""",
+    },
+}
+
 # 4e. Retry: Had Error? — route to Slack alert if retry threw
 retry_had_error = {
     "id": "retry_had_error",
@@ -1088,6 +1257,7 @@ NODES = [
     retry_if_stale,
     retry_sfdc_query,
     retry_apply_updates,
+    retry_cleanup_noshows,
     retry_had_error,
     retry_error_format,
     if_weekly,
@@ -1121,7 +1291,9 @@ CONNECTIONS = {
     "Refresh Google Token": {"main": [[
         {"node": "If Weekly Summary", "type": "main", "index": 0},
         {"node": "Retry: Collect Stale", "type": "main", "index": 0},
+        {"node": "Retry: Cleanup No-shows", "type": "main", "index": 0},
     ]]},
+    "Retry: Cleanup No-shows": {"main": [[]]},
     # Retry chain (side-effect only; does not feed Slack alert)
     "Retry: Collect Stale": {"main": [[{"node": "Retry: Has Stale?", "type": "main", "index": 0}]]},
     "Retry: Has Stale?": {"main": [
