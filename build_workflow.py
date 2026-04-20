@@ -48,6 +48,12 @@ with open(google_creds_path) as f:
 # Note: Google OAuth is handled by the "Refresh Google Token" HTTP node in the workflow.
 # No N8N credential needed — the refresh_token/client creds are embedded in the node.
 
+# Shared filter constants (C1/S1) — single source of truth across weflow-monitoring
+# and csm-weekly-review. Any domain add/remove goes in this one JSON file.
+FILTER_CONSTANTS = json.load(open(
+    "/Users/andi.deng/Desktop/andi-ai/data/config/meeting-filter-constants.json"
+))
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 SFDC_CRED_ID = "CbWF1JnPA0assjsx"
@@ -562,9 +568,11 @@ filter_dedup_code = {
     "parameters": {
         "mode": "runOnceForAllItems",
         "jsCode": """
-const INTERNAL_DOMAINS = ["hginsights.com", "hgdata.com", "trustradius.com", "madkudu.com", "smoothoperator.cc"];
-const FREEMAIL_DOMAINS = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
-  "aol.com", "icloud.com", "protonmail.com", "live.com", "me.com", "googlemail.com"];
+// C1/S1: INTERNAL_DOMAINS + FREEMAIL_DOMAINS loaded from shared JSON config
+// at /Users/andi.deng/Desktop/andi-ai/data/config/meeting-filter-constants.json
+// so weflow-monitoring and csm-weekly-review stay in sync.
+const INTERNAL_DOMAINS = """ + json.dumps(FILTER_CONSTANTS["INTERNAL_DOMAINS"]) + """;
+const FREEMAIL_DOMAINS = """ + json.dumps(FILTER_CONSTANTS["FREEMAIL_DOMAINS"]) + """;
 
 function getDomain(email) {
   return (email || "").split("@")[1] || "";
