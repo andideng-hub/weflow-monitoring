@@ -12,7 +12,9 @@ Known edge cases observed during operation, and how the workflow handles them.
 | All externals declined/needsAction, but Weflow recorded | ✅ Covered — transcript wins; meeting happened regardless of RSVPs |
 | CSM declined but meeting was recorded | ✅ Covered — transcript wins |
 | No customer meetings on a given day | Sends "No CSM customer meetings found" confirmation |
-| Weekend | Cron only runs Mon-Fri |
+| Monday (weekly summary) | Reads prior week's alerts from sheet, no GCal/SFDC query |
+| Saturday (Friday catch-up) | Normal daily alert for yesterday = Friday |
+| Sunday | Cron skipped; Friday covered by Saturday, Saturday covered by Mon summary |
 
 ## Known Limitations
 
