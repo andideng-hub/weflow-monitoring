@@ -123,7 +123,9 @@ webhook_trigger = {
     "parameters": {
         "path": "weflow-monitoring-test",
         "httpMethod": "GET",
-        "responseMode": "lastNode",
+        # "onReceived" returns 200 immediately — avoids "No item to return" when
+        # parallel branches (retry chain) hit dead-end terminals.
+        "responseMode": "onReceived",
         "options": {},
     },
     "webhookId": "weflow-test-hook",
