@@ -21,16 +21,34 @@ If Weflow is broken, SFDC records may not exist at all. Starting from GCal ensur
 
 The approach: compare what *should* have been recorded (GCal meetings with external attendees) against what *was* recorded (Weflow transcripts in Salesforce).
 
-### Data Flow
+### Cadence
+
+The workflow fires Mon–Sat at 7 AM PT (`0 7 * * 1-6`) and branches by day:
+
+- **Tue–Sat: daily gap alert** — checks yesterday's meetings against Weflow. Sat catches Friday. Sun is skipped.
+- **Mon: weekly summary** — reads the prior week's alerts (Tue–Sat alert-dates of last week) from the sheet and posts a coverage rollup. Does NOT query GCal or SFDC on Monday.
+
+### Daily Data Flow (Tue–Sat)
 
 ```
-GCal (16 CSM calendars)
-  → Filter to customer-facing meetings (corporate external attendees)
+GCal (15 CSM calendars)
+  → Filter to customer-facing meetings (≥1 corporate external attendee)
   → Deduplicate shared meetings by iCalUID
   → Match against SFDC Weflow__WeflowVideoRecording__c
-  → Append one row per (meeting × CSM) to Google Sheet cache
+  → Apply post-filter: skip rows with no transcript AND all-declined/needsAction externals
+  → Append one row per meeting to Google Sheet cache
   → Slack alert at 7 AM PT (terse: counts + sheet link)
 ```
+
+### Weekly Data Flow (Mon)
+
+```
+Read alert_date rows from Google Sheet (last Tue → last Sat range)
+  → Aggregate covered / gap counts
+  → Slack summary at 7 AM PT: "📊 Weflow Weekly Coverage — Apr 20 to Apr 24"
+```
+
+Weekly summary fires Monday morning. By then the prior week's Tue–Sat alerts have already written rows for Mon–Fri meetings, so the summary reads five days of meeting data from the sheet. No re-query of GCal/SFDC.
 
 ### Output Model: Sheet as Detail, Slack as Summary
 

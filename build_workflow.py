@@ -95,7 +95,7 @@ schedule_trigger = {
     "position": pos(0, 0),
     "parameters": {
         "rule": {
-            "interval": [{"field": "cronExpression", "expression": "0 7 * * 1-5"}]
+            "interval": [{"field": "cronExpression", "expression": "0 7 * * 1-6"}]
         }
     },
 }
@@ -135,46 +135,60 @@ date_range_code = {
     "position": pos(300, 100),
     "parameters": {
         "jsCode": """
-// Compute date range in Pacific Time (PDT = UTC-7, PST = UTC-8)
-// Mon-Thu: check yesterday. Monday: check Friday (skip weekend).
+// Compute date range in Pacific Time (PDT = UTC-7, PST = UTC-8).
+//   Mon (dayOfWeek=1): mode="weekly"  — summary of prior week (no GCal/SFDC query)
+//   Tue-Sat (2-6):     mode="daily"   — check yesterday's meetings
 const nowUtc = new Date();
 
 // "Today" midnight PT in UTC = today 07:00 UTC (PDT season: Apr-Oct)
 const todayMidnightPT = new Date(nowUtc);
 todayMidnightPT.setUTCHours(7, 0, 0, 0);
-
-// If we're before 07:00 UTC, "today midnight PT" is actually yesterday in UTC terms
 if (nowUtc.getUTCHours() < 7) {
   todayMidnightPT.setUTCDate(todayMidnightPT.getUTCDate() - 1);
 }
 
-// Day of week: 0=Sun, 1=Mon, ..., 5=Fri, 6=Sat
 const todayPT = new Date(todayMidnightPT.getTime() - 1);
 const dayOfWeek = todayPT.getUTCDay();
+const mode = (dayOfWeek === 1) ? "weekly" : "daily";
 
-// Monday: look back 3 days (Fri+Sat+Sun). Other days: look back 1 day.
-const lookbackDays = (dayOfWeek === 1) ? 3 : 1;
+const fmtDay = (d, opts) => d.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', ...opts });
+// en-CA gives YYYY-MM-DD, matching the sheet's alert_date column format
+const isoDate = (d) => d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 
-const timeMax = todayMidnightPT.toISOString();
-const timeMin = new Date(todayMidnightPT.getTime() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+let timeMin, timeMax, dateLabel, weeklyMin, weeklyMax;
 
-// Human-readable date label for Slack
-let dateLabel;
-if (lookbackDays === 3) {
-  const fri = new Date(todayMidnightPT.getTime() - 3 * 24 * 60 * 60 * 1000 + 12 * 60 * 60 * 1000);
-  dateLabel = 'Friday, ' + fri.toLocaleDateString('en-US', {
-    year: 'numeric', month: 'long', day: 'numeric',
-    timeZone: 'America/Los_Angeles'
-  });
+if (mode === "weekly") {
+  // Last week's meeting dates = previous Mon through previous Fri
+  const lastMon = new Date(todayMidnightPT.getTime() - 7 * 86400000);
+  const lastFri = new Date(todayMidnightPT.getTime() - 3 * 86400000);
+  // Alert-date range in the sheet = Tue..Sat of previous week
+  // (Tue alerted Mon meetings ... Sat alerted Fri meetings)
+  const lastTue = new Date(todayMidnightPT.getTime() - 6 * 86400000);
+  const lastSat = new Date(todayMidnightPT.getTime() - 2 * 86400000);
+  weeklyMin = isoDate(lastTue);
+  weeklyMax = isoDate(lastSat);
+
+  const startLabel = fmtDay(lastMon, { month: 'short', day: 'numeric' });
+  const endLabel = fmtDay(lastFri, { month: 'short', day: 'numeric' });
+  dateLabel = startLabel + ' to ' + endLabel;
+
+  // GCal window unused in weekly mode but kept for shape consistency
+  timeMin = todayMidnightPT.toISOString();
+  timeMax = todayMidnightPT.toISOString();
 } else {
+  // Daily: yesterday only
+  timeMax = todayMidnightPT.toISOString();
+  timeMin = new Date(todayMidnightPT.getTime() - 86400000).toISOString();
   const yesterdayNoon = new Date(todayMidnightPT.getTime() - 12 * 60 * 60 * 1000);
   dateLabel = yesterdayNoon.toLocaleDateString('en-US', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
     timeZone: 'America/Los_Angeles'
   });
+  weeklyMin = "";
+  weeklyMax = "";
 }
 
-return [{ json: { timeMin, timeMax, dateLabel } }];
+return [{ json: { mode, timeMin, timeMax, dateLabel, weeklyMin, weeklyMax } }];
 """
     },
 }
@@ -591,6 +605,103 @@ return [{{ json: {{ message }} }}];
     },
 }
 
+# ── Weekly summary path (Monday-only) ─────────────────────────────────────────
+# 24a. IF Weekly Summary — branches execution on the `mode` field from date-range
+if_weekly = {
+    "id": "if_weekly",
+    "name": "If Weekly Summary",
+    "type": "n8n-nodes-base.if",
+    "typeVersion": 2,
+    "position": pos(600, 100),
+    "parameters": {
+        "conditions": {
+            "options": {
+                "caseSensitive": True,
+                "leftValue": "",
+                "typeValidation": "strict",
+            },
+            "conditions": [{
+                "id": "mode_equals_weekly",
+                "leftValue": "={{ $('Compute Date Range').first().json.mode }}",
+                "rightValue": "weekly",
+                "operator": {"type": "string", "operation": "equals"},
+            }],
+            "combinator": "and",
+        },
+        "options": {},
+    },
+}
+
+# 24b. Read Sheet Last Week — aggregates coverage from alert_date range
+read_sheet_week_code = {
+    "id": "read_sheet_week",
+    "name": "Read Sheet Last Week",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(800, -100),
+    "parameters": {
+        "jsCode": f"""
+const {{ weeklyMin, weeklyMax, dateLabel }} = $('Compute Date Range').first().json;
+const token = $('Refresh Google Token').first().json.access_token;
+
+const resp = await this.helpers.httpRequest({{
+  method: 'GET',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:J',
+  headers: {{ Authorization: 'Bearer ' + token }},
+  json: true,
+}});
+
+const rows = (resp.values || []).slice(1);  // skip header
+const lastWeek = rows.filter(r => r && r[0] && r[0] >= weeklyMin && r[0] <= weeklyMax);
+
+let coveredCount = 0, gapCount = 0;
+for (const r of lastWeek) {{
+  const status = r[4] || "";
+  if (status.includes("Covered")) coveredCount++;
+  else if (status.includes("Gap")) gapCount++;
+}}
+
+return [{{ json: {{
+  coveredCount,
+  gapCount,
+  totalCount: coveredCount + gapCount,
+  dateLabel,
+  weeklyMin,
+  weeklyMax,
+}} }}];
+""",
+    },
+}
+
+# 24c. Format Weekly Slack Message — stats-only summary
+slack_format_weekly_code = {
+    "id": "slack_format_weekly",
+    "name": "Format Weekly Slack Message",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(1000, -100),
+    "parameters": {
+        "jsCode": f"""
+const {{ coveredCount, gapCount, totalCount, dateLabel }} = $json;
+const SHEET = '{SHEET_URL}';
+
+if (totalCount === 0) {{
+  return [{{ json: {{
+    message: '📊 *Weflow Weekly Coverage — ' + dateLabel + '*\\nNo alerts logged last week.'
+  }} }}];
+}}
+
+const pct = Math.round((coveredCount / totalCount) * 100);
+const line = '✅ ' + coveredCount + ' recorded (' + pct + '%) | ❌ ' + gapCount + ' gaps | 📅 ' + totalCount + ' total';
+const message = '📊 *Weflow Weekly Coverage — ' + dateLabel + '*\\n' +
+  line + '\\n' +
+  '🔗 <' + SHEET + '|Details in Google Sheet>';
+
+return [{{ json: {{ message }} }}];
+""",
+    },
+}
+
 # 25. Slack DM Node
 slack_dm = {
     "id": "slack_dm",
@@ -617,6 +728,9 @@ NODES = [
     webhook_trigger,
     date_range_code,
     refresh_google_token,
+    if_weekly,
+    read_sheet_week_code,
+    slack_format_weekly_code,
     *gcal_nodes,
     *tag_nodes,
     merge_gcal,
@@ -638,9 +752,23 @@ CONNECTIONS = {
     "Daily 7 AM PT": {"main": [[{"node": "Compute Date Range", "type": "main", "index": 0}]]},
     "Manual Test Trigger": {"main": [[{"node": "Compute Date Range", "type": "main", "index": 0}]]},
     "Webhook Test Trigger": {"main": [[{"node": "Compute Date Range", "type": "main", "index": 0}]]},
-    # Date Range → Refresh Token → all 7 GCal nodes (fan-out)
+    # Date Range → Refresh Token → If Weekly Summary
     "Compute Date Range": {"main": [[{"node": "Refresh Google Token", "type": "main", "index": 0}]]},
-    "Refresh Google Token": {"main": [[]]},
+    "Refresh Google Token": {"main": [[{"node": "If Weekly Summary", "type": "main", "index": 0}]]},
+    # If Weekly Summary: true → weekly path, false → daily GCal fan-out
+    "If Weekly Summary": {
+        "main": [
+            [{"node": "Read Sheet Last Week", "type": "main", "index": 0}],
+            [],  # false branch populated below by CSM fan-out
+        ]
+    },
+    # Weekly path: Read Sheet → Format Weekly Slack → Slack DM
+    "Read Sheet Last Week": {
+        "main": [[{"node": "Format Weekly Slack Message", "type": "main", "index": 0}]]
+    },
+    "Format Weekly Slack Message": {
+        "main": [[{"node": "Slack: #weflow-daily-alert", "type": "main", "index": 0}]]
+    },
 }
 
 for i, email in enumerate(CSM_CALENDARS):
@@ -648,7 +776,8 @@ for i, email in enumerate(CSM_CALENDARS):
     gcal_name = f"GCal: {first_name}"
     tag_name = f"Tag: {first_name}"
 
-    CONNECTIONS["Refresh Google Token"]["main"][0].append(
+    # Daily path fans out from If Weekly Summary (false branch, index 1)
+    CONNECTIONS["If Weekly Summary"]["main"][1].append(
         {"node": gcal_name, "type": "main", "index": 0}
     )
     CONNECTIONS[gcal_name] = {
