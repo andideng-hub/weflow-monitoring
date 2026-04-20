@@ -331,106 +331,155 @@ retry_apply_updates = {
     "position": pos(1080, 400),
     "parameters": {
         "jsCode": f"""
-const sfdc = $input.first().json.records || [];
-const stale = $('Retry: Collect Stale').first().json.stale || [];
-const token = $('Refresh Google Token').first().json.access_token;
+// Wrap the whole retry in try/catch so a failure surfaces as a Slack alert (L3)
+// instead of silently disappearing into the n8n execution log.
+try {{
+  const sfdc = $input.first().json.records || [];
+  const stale = $('Retry: Collect Stale').first().json.stale || [];
+  const token = $('Refresh Google Token').first().json.access_token;
 
-// Map iCalUID → {{recordingId, hasTranscript}}
-const sfMap = {{}};
-for (const r of sfdc) {{
-  const hasT = r.Weflow__Transcript__c !== null && r.Weflow__Transcript__c !== undefined && r.Weflow__Transcript__c !== '';
-  sfMap[r.Weflow__EventId__c] = {{
-    recordingId: r.Id || '',
-    hasTranscript: hasT,
-  }};
-}}
+  // Map iCalUID → {{recordingId, hasTranscript}}
+  const sfMap = {{}};
+  for (const r of sfdc) {{
+    const hasT = r.Weflow__Transcript__c !== null && r.Weflow__Transcript__c !== undefined && r.Weflow__Transcript__c !== '';
+    sfMap[r.Weflow__EventId__c] = {{
+      recordingId: r.Id || '',
+      hasTranscript: hasT,
+    }};
+  }}
 
-// Find stale rows now covered
-const recovered = [];
-for (const s of stale) {{
-  const m = sfMap[s.iCalUID];
-  if (m && m.hasTranscript) recovered.push({{ ...s, recordingId: m.recordingId }});
-}}
+  // Find stale rows now covered
+  const recovered = [];
+  for (const s of stale) {{
+    const m = sfMap[s.iCalUID];
+    if (m && m.hasTranscript) recovered.push({{ ...s, recordingId: m.recordingId }});
+  }}
 
-if (recovered.length === 0) {{
-  return [{{ json: {{ recoveredCount: 0, note: 'no stale gaps recovered' }} }}];
-}}
+  if (recovered.length === 0) {{
+    return [{{ json: {{ recoveredCount: 0, note: 'no stale gaps recovered', error: '' }} }}];
+  }}
 
-// 1. batchUpdate main sheet: col E (status) + col I (recordingId)
-const data = [];
-for (const r of recovered) {{
-  data.push({{ range: `Sheet1!E${{r.rowIdx}}`, values: [['\u2705 Covered']] }});
-  data.push({{ range: `Sheet1!I${{r.rowIdx}}`, values: [[r.recordingId]] }});
-}}
-await this.helpers.httpRequest({{
-  method: 'POST',
-  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchUpdate',
-  headers: {{ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }},
-  json: true,
-  body: {{ valueInputOption: 'RAW', data }},
-}});
-
-// 2. Remove recovered gaps from Issue Log sheet — match by meeting title + date
-//    Issue log schema: [Issue, Status, Meeting Title, CSM, Meeting Date]
-const ilResp = await this.helpers.httpRequest({{
-  method: 'GET',
-  url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:E',
-  headers: {{ Authorization: 'Bearer ' + token }},
-  json: true,
-}});
-const ilRows = ilResp.values || [];
-
-// Build lookup of (title, date) → recovered rowIdx for main sheet lookup
-// but we only have iCalUID here. Re-fetch main sheet rows for title + date.
-const mainResp = await this.helpers.httpRequest({{
-  method: 'GET',
-  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
-  headers: {{ Authorization: 'Bearer ' + token }},
-  json: true,
-}});
-const mainRows = mainResp.values || [];
-const recoveredKeys = new Set();
-for (const r of recovered) {{
-  const mr = mainRows[r.rowIdx - 1];
-  if (!mr) continue;
-  const title = mr[5] || '';
-  const meetingDate = (mr[1] || '').split(' ')[0];  // ptDateTime "YYYY-MM-DD HH:MM"
-  recoveredKeys.add(title + '|' + meetingDate);
-}}
-
-// Find matching Issue Log rows (col C = title, col E = meeting date)
-const issueRowsToDelete = [];
-for (let i = 1; i < ilRows.length; i++) {{
-  const r = ilRows[i];
-  if (!r) continue;
-  const key = (r[2] || '') + '|' + (r[4] || '');
-  if (recoveredKeys.has(key)) issueRowsToDelete.push(i + 1);  // 1-based
-}}
-
-// Delete bottom-up to preserve row indices
-issueRowsToDelete.sort((a, b) => b - a);
-for (const row of issueRowsToDelete) {{
+  // 1. batchUpdate main sheet: col E (status) + col I (recordingId)
+  const data = [];
+  for (const r of recovered) {{
+    data.push({{ range: `Sheet1!E${{r.rowIdx}}`, values: [['\u2705 Covered']] }});
+    data.push({{ range: `Sheet1!I${{r.rowIdx}}`, values: [[r.recordingId]] }});
+  }}
   await this.helpers.httpRequest({{
     method: 'POST',
-    url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}:batchUpdate',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchUpdate',
     headers: {{ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }},
     json: true,
-    body: {{
-      requests: [{{
-        deleteDimension: {{
-          range: {{ sheetId: 0, dimension: 'ROWS', startIndex: row - 1, endIndex: row }}
-        }}
-      }}]
-    }},
+    body: {{ valueInputOption: 'RAW', data }},
   }});
-}}
 
-return [{{ json: {{
-  recoveredCount: recovered.length,
-  sheetsUpdated: recovered.length,
-  issueLogRowsDeleted: issueRowsToDelete.length,
-}} }}];
+  // 2. Remove recovered gaps from Issue Log sheet — match by (title, csm, date) (B1)
+  //    Issue log schema: [Issue(A), Status(B), Meeting Title(C), CSM(D), Meeting Date(E)]
+  //    Main sheet schema: alert_date, ptDateTime, csms(C=2), team, status, title(F=5), ...
+  //    Including CSM avoids collisions when two different meetings share title+date.
+  const ilResp = await this.helpers.httpRequest({{
+    method: 'GET',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:E',
+    headers: {{ Authorization: 'Bearer ' + token }},
+    json: true,
+  }});
+  const ilRows = ilResp.values || [];
+
+  const mainResp = await this.helpers.httpRequest({{
+    method: 'GET',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
+    headers: {{ Authorization: 'Bearer ' + token }},
+    json: true,
+  }});
+  const mainRows = mainResp.values || [];
+  const recoveredKeys = new Set();
+  for (const r of recovered) {{
+    const mr = mainRows[r.rowIdx - 1];
+    if (!mr) continue;
+    const title = mr[5] || '';
+    const csms = mr[2] || '';
+    const meetingDate = (mr[1] || '').split(' ')[0];  // "YYYY-MM-DD HH:MM" → "YYYY-MM-DD"
+    recoveredKeys.add(title + '|' + csms + '|' + meetingDate);
+  }}
+
+  const issueRowsToDelete = [];
+  for (let i = 1; i < ilRows.length; i++) {{
+    const r = ilRows[i];
+    if (!r) continue;
+    // Issue Log: title=C(2), csm=D(3), date=E(4)
+    const key = (r[2] || '') + '|' + (r[3] || '') + '|' + (r[4] || '');
+    if (recoveredKeys.has(key)) issueRowsToDelete.push(i + 1);
+  }}
+
+  issueRowsToDelete.sort((a, b) => b - a);
+  for (const row of issueRowsToDelete) {{
+    await this.helpers.httpRequest({{
+      method: 'POST',
+      url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}:batchUpdate',
+      headers: {{ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }},
+      json: true,
+      body: {{
+        requests: [{{
+          deleteDimension: {{
+            range: {{ sheetId: 0, dimension: 'ROWS', startIndex: row - 1, endIndex: row }}
+          }}
+        }}]
+      }},
+    }});
+  }}
+
+  return [{{ json: {{
+    recoveredCount: recovered.length,
+    sheetsUpdated: recovered.length,
+    issueLogRowsDeleted: issueRowsToDelete.length,
+    error: '',
+  }} }}];
+}} catch (err) {{
+  return [{{ json: {{
+    recoveredCount: 0,
+    error: (err && err.message) ? err.message.slice(0, 500) : String(err).slice(0, 500),
+    stack: (err && err.stack) ? err.stack.split('\\n').slice(0, 3).join(' | ') : '',
+  }} }}];
+}}
 """,
+    },
+}
+
+# 4e. Retry: Had Error? — route to Slack alert if retry threw
+retry_had_error = {
+    "id": "retry_had_error",
+    "name": "Retry: Had Error?",
+    "type": "n8n-nodes-base.if",
+    "typeVersion": 2.3,
+    "position": pos(1280, 400),
+    "parameters": {
+        "conditions": {
+            "options": {"caseSensitive": True, "leftValue": ""},
+            "combinator": "and",
+            "conditions": [{
+                "leftValue": "={{ $json.error }}",
+                "rightValue": "",
+                "operator": {"type": "string", "operation": "notEmpty"},
+            }],
+        }
+    },
+}
+
+# 4f. Retry: Format Error Slack Message
+retry_error_format = {
+    "id": "retry_error_format",
+    "name": "Retry: Format Error Slack",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(1480, 400),
+    "parameters": {
+        "jsCode": """
+const { error, stack } = $json;
+const message = '\\u26a0\\ufe0f *Weflow Retry Failed* \\n' +
+  '`' + (error || 'unknown error').replace(/`/g, '\\'') + '`\\n' +
+  (stack ? '_trace:_ `' + stack.replace(/`/g, '\\'') + '`' : '');
+return [{ json: { message } }];
+"""
     },
 }
 
@@ -1005,6 +1054,8 @@ NODES = [
     retry_if_stale,
     retry_sfdc_query,
     retry_apply_updates,
+    retry_had_error,
+    retry_error_format,
     if_weekly,
     read_sheet_week_code,
     slack_format_weekly_code,
@@ -1044,7 +1095,12 @@ CONNECTIONS = {
         [],  # noStale=false branch: dead end
     ]},
     "Retry: SFDC Query": {"main": [[{"node": "Retry: Apply Updates", "type": "main", "index": 0}]]},
-    "Retry: Apply Updates": {"main": [[]]},
+    "Retry: Apply Updates": {"main": [[{"node": "Retry: Had Error?", "type": "main", "index": 0}]]},
+    "Retry: Had Error?": {"main": [
+        [{"node": "Retry: Format Error Slack", "type": "main", "index": 0}],
+        [],  # no error — dead end
+    ]},
+    "Retry: Format Error Slack": {"main": [[{"node": "Slack: #weflow-daily-alert", "type": "main", "index": 0}]]},
     # If Weekly Summary: true → weekly path, false → daily GCal fan-out
     "If Weekly Summary": {
         "main": [
