@@ -221,6 +221,219 @@ refresh_google_token = {
     },
 }
 
+# ── Retry Stale Gaps (runs alongside daily flow; does not affect Slack alert) ──
+# Re-query SFDC for recent ❌ Gap rows — if Weflow synced late, update sheet
+# status to ✅ Covered and remove the row from the Weflow Issue Log.
+
+# 4a. Retry: Collect Stale — read main sheet, filter ❌ Gap rows in last 3 days
+retry_collect_stale = {
+    "id": "retry_collect_stale",
+    "name": "Retry: Collect Stale",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(480, 400),
+    "parameters": {
+        "jsCode": f"""
+const token = $('Refresh Google Token').first().json.access_token;
+const resp = await this.helpers.httpRequest({{
+  method: 'GET',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
+  headers: {{ Authorization: 'Bearer ' + token }},
+  json: true,
+}});
+const rows = resp.values || [];
+// today in PT, YYYY-MM-DD
+const todayPT = new Date().toLocaleDateString('en-CA', {{ timeZone: 'America/Los_Angeles' }});
+const cutoff = new Date(todayPT + 'T00:00:00Z');
+cutoff.setUTCDate(cutoff.getUTCDate() - 3);
+const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+// Row indexes are 1-based in Sheets API; +1 for header offset
+const stale = [];
+for (let i = 1; i < rows.length; i++) {{
+  const r = rows[i];
+  if (!r || r.length < 5) continue;
+  const alertDate = r[0];
+  const status = r[4] || '';
+  if (!status.includes('Gap')) continue;
+  if (!alertDate || alertDate < cutoffStr) continue;
+  const instanceId = r[9] || '';
+  let iCalUID = r[10] || '';
+  // Fallback for rows written before col K existed: try instanceId + @google.com.
+  // Works for non-recurring meetings; recurring instances won't match, we skip.
+  if (!iCalUID && instanceId && !instanceId.includes('_')) {{
+    iCalUID = instanceId + '@google.com';
+  }}
+  if (!iCalUID) continue;
+  stale.push({{ rowIdx: i + 1, iCalUID, instanceId, alertDate }});
+}}
+
+if (stale.length === 0) return [{{ json: {{ noStale: true, stale: [] }} }}];
+
+const icalIds = stale.map(s => "'" + s.iCalUID.replace(/'/g, "\\\\'") + "'").join(',');
+const soql = `SELECT Id, Weflow__EventId__c, Weflow__Transcript__c, Weflow__RecordingId__c FROM Weflow__WeflowVideoRecording__c WHERE Weflow__EventId__c IN (${{icalIds}})`;
+return [{{ json: {{ noStale: false, stale, soql }} }}];
+""",
+    },
+}
+
+# 4b. Retry: Has Stale? — gate
+retry_if_stale = {
+    "id": "retry_if_stale",
+    "name": "Retry: Has Stale?",
+    "type": "n8n-nodes-base.if",
+    "typeVersion": 2.3,
+    "position": pos(680, 400),
+    "parameters": {
+        "conditions": {
+            "options": {"caseSensitive": True, "leftValue": ""},
+            "combinator": "and",
+            "conditions": [{
+                "leftValue": "={{ $json.noStale }}",
+                "rightValue": False,
+                "operator": {"type": "boolean", "operation": "equals"},
+            }],
+        }
+    },
+}
+
+# 4c. Retry: SFDC Query — uses SFDC OAuth credential
+retry_sfdc_query = {
+    "id": "retry_sfdc_query",
+    "name": "Retry: SFDC Query",
+    "type": "n8n-nodes-base.httpRequest",
+    "typeVersion": 4.2,
+    "position": pos(880, 400),
+    "credentials": {
+        "salesforceOAuth2Api": {"id": SFDC_CRED_ID, "name": "Salesforce account 2"}
+    },
+    "parameters": {
+        "method": "GET",
+        "url": f"{SFDC_URL}/services/data/v58.0/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "salesforceOAuth2Api",
+        "sendQuery": True,
+        "queryParameters": {
+            "parameters": [
+                {"name": "q", "value": "={{ $('Retry: Collect Stale').first().json.soql }}"}
+            ]
+        },
+        "options": {},
+    },
+}
+
+# 4d. Retry: Apply Updates — batchUpdate main sheet + delete from Issue Log
+retry_apply_updates = {
+    "id": "retry_apply_updates",
+    "name": "Retry: Apply Updates",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(1080, 400),
+    "parameters": {
+        "jsCode": f"""
+const sfdc = $input.first().json.records || [];
+const stale = $('Retry: Collect Stale').first().json.stale || [];
+const token = $('Refresh Google Token').first().json.access_token;
+
+// Map iCalUID → {{recordingId, hasTranscript}}
+const sfMap = {{}};
+for (const r of sfdc) {{
+  const hasT = r.Weflow__Transcript__c !== null && r.Weflow__Transcript__c !== undefined && r.Weflow__Transcript__c !== '';
+  sfMap[r.Weflow__EventId__c] = {{
+    recordingId: r.Id || '',
+    hasTranscript: hasT,
+  }};
+}}
+
+// Find stale rows now covered
+const recovered = [];
+for (const s of stale) {{
+  const m = sfMap[s.iCalUID];
+  if (m && m.hasTranscript) recovered.push({{ ...s, recordingId: m.recordingId }});
+}}
+
+if (recovered.length === 0) {{
+  return [{{ json: {{ recoveredCount: 0, note: 'no stale gaps recovered' }} }}];
+}}
+
+// 1. batchUpdate main sheet: col E (status) + col I (recordingId)
+const data = [];
+for (const r of recovered) {{
+  data.push({{ range: `Sheet1!E${{r.rowIdx}}`, values: [['\u2705 Covered']] }});
+  data.push({{ range: `Sheet1!I${{r.rowIdx}}`, values: [[r.recordingId]] }});
+}}
+await this.helpers.httpRequest({{
+  method: 'POST',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchUpdate',
+  headers: {{ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }},
+  json: true,
+  body: {{ valueInputOption: 'RAW', data }},
+}});
+
+// 2. Remove recovered gaps from Issue Log sheet — match by meeting title + date
+//    Issue log schema: [Issue, Status, Meeting Title, CSM, Meeting Date]
+const ilResp = await this.helpers.httpRequest({{
+  method: 'GET',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:E',
+  headers: {{ Authorization: 'Bearer ' + token }},
+  json: true,
+}});
+const ilRows = ilResp.values || [];
+
+// Build lookup of (title, date) → recovered rowIdx for main sheet lookup
+// but we only have iCalUID here. Re-fetch main sheet rows for title + date.
+const mainResp = await this.helpers.httpRequest({{
+  method: 'GET',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
+  headers: {{ Authorization: 'Bearer ' + token }},
+  json: true,
+}});
+const mainRows = mainResp.values || [];
+const recoveredKeys = new Set();
+for (const r of recovered) {{
+  const mr = mainRows[r.rowIdx - 1];
+  if (!mr) continue;
+  const title = mr[5] || '';
+  const meetingDate = (mr[1] || '').split(' ')[0];  // ptDateTime "YYYY-MM-DD HH:MM"
+  recoveredKeys.add(title + '|' + meetingDate);
+}}
+
+// Find matching Issue Log rows (col C = title, col E = meeting date)
+const issueRowsToDelete = [];
+for (let i = 1; i < ilRows.length; i++) {{
+  const r = ilRows[i];
+  if (!r) continue;
+  const key = (r[2] || '') + '|' + (r[4] || '');
+  if (recoveredKeys.has(key)) issueRowsToDelete.push(i + 1);  // 1-based
+}}
+
+// Delete bottom-up to preserve row indices
+issueRowsToDelete.sort((a, b) => b - a);
+for (const row of issueRowsToDelete) {{
+  await this.helpers.httpRequest({{
+    method: 'POST',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}:batchUpdate',
+    headers: {{ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }},
+    json: true,
+    body: {{
+      requests: [{{
+        deleteDimension: {{
+          range: {{ sheetId: 0, dimension: 'ROWS', startIndex: row - 1, endIndex: row }}
+        }}
+      }}]
+    }},
+  }});
+}}
+
+return [{{ json: {{
+  recoveredCount: recovered.length,
+  sheetsUpdated: recovered.length,
+  issueLogRowsDeleted: issueRowsToDelete.length,
+}} }}];
+""",
+    },
+}
+
 # 5-11. GCal HTTP Request nodes (one per CSM) — use Bearer token from refresh node
 gcal_nodes = []
 for i, email in enumerate(CSM_CALENDARS):
@@ -507,6 +720,7 @@ for (const m of meetings) {{
     m.externalCount,
     sf.recordingId,
     m.instanceId,  // unique per recurrence instance
+    m.iCalUID,     // SFDC Weflow__EventId__c key — used by Retry: Collect Stale
   ]);
 }}
 
@@ -555,7 +769,7 @@ sheet_append = {
     "position": pos(2400, -150),
     "parameters": {
         "method": "POST",
-        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:J:append",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K:append",
         "authentication": "none",
         "sendHeaders": True,
         "headerParameters": {
@@ -705,7 +919,7 @@ const token = $('Refresh Google Token').first().json.access_token;
 
 const resp = await this.helpers.httpRequest({{
   method: 'GET',
-  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:J',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
   headers: {{ Authorization: 'Bearer ' + token }},
   json: true,
 }});
@@ -787,6 +1001,10 @@ NODES = [
     webhook_trigger,
     date_range_code,
     refresh_google_token,
+    retry_collect_stale,
+    retry_if_stale,
+    retry_sfdc_query,
+    retry_apply_updates,
     if_weekly,
     read_sheet_week_code,
     slack_format_weekly_code,
@@ -813,9 +1031,20 @@ CONNECTIONS = {
     "Daily 7 AM PT": {"main": [[{"node": "Compute Date Range", "type": "main", "index": 0}]]},
     "Manual Test Trigger": {"main": [[{"node": "Compute Date Range", "type": "main", "index": 0}]]},
     "Webhook Test Trigger": {"main": [[{"node": "Compute Date Range", "type": "main", "index": 0}]]},
-    # Date Range → Refresh Token → If Weekly Summary
+    # Date Range → Refresh Token → fan out to (a) If Weekly Summary and (b) Retry chain
     "Compute Date Range": {"main": [[{"node": "Refresh Google Token", "type": "main", "index": 0}]]},
-    "Refresh Google Token": {"main": [[{"node": "If Weekly Summary", "type": "main", "index": 0}]]},
+    "Refresh Google Token": {"main": [[
+        {"node": "If Weekly Summary", "type": "main", "index": 0},
+        {"node": "Retry: Collect Stale", "type": "main", "index": 0},
+    ]]},
+    # Retry chain (side-effect only; does not feed Slack alert)
+    "Retry: Collect Stale": {"main": [[{"node": "Retry: Has Stale?", "type": "main", "index": 0}]]},
+    "Retry: Has Stale?": {"main": [
+        [{"node": "Retry: SFDC Query", "type": "main", "index": 0}],
+        [],  # noStale=false branch: dead end
+    ]},
+    "Retry: SFDC Query": {"main": [[{"node": "Retry: Apply Updates", "type": "main", "index": 0}]]},
+    "Retry: Apply Updates": {"main": [[]]},
     # If Weekly Summary: true → weekly path, false → daily GCal fan-out
     "If Weekly Summary": {
         "main": [
