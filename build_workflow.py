@@ -304,14 +304,7 @@ for (const item of $input.all()) {
     const external = attendees.filter(a => isExternal(a.email || ""));
     if (external.length === 0) continue;
 
-    const allDeclined = attendees.length > 0 &&
-      attendees.every(a => a.responseStatus === "declined");
-    if (allDeclined) continue;
-
     const iCalUID = ev.iCalUID || ev.id;
-    // Skip only if ALL external attendees declined (matches CSM reviews logic)
-    const extNotDeclined = external.filter(a => a.responseStatus !== "declined");
-    if (extNotDeclined.length === 0) continue;
 
     if (seen[iCalUID]) {
       if (!seen[iCalUID].csms.includes(calendarId)) {
@@ -327,6 +320,7 @@ for (const item of $input.all()) {
         csms: [calendarId],
         startIso: ev.start && (ev.start.dateTime || ev.start.date) || "",
         customerDomain: getDomain(firstExt.email || ""),
+        externalResponses: external.map(a => a.responseStatus || "needsAction"),
       };
     }
   }
@@ -466,11 +460,21 @@ function ptDateTime(iso) {{
 const alertDate = new Date().toLocaleDateString('en-CA', {{ timeZone: 'America/Los_Angeles' }});
 const meetings = $('Filter + Dedup').all().map(i => i.json);
 
-let gapCount = 0, coveredCount = 0;
+let gapCount = 0, coveredCount = 0, skippedCount = 0;
 const sheetValues = [];
 
 for (const m of meetings) {{
   const sf = sfMap[m.iCalUID] || {{ recordingId: "", hasTranscript: false }};
+
+  // Transcript-first: if Weflow recorded it, the meeting happened. Period.
+  // Only fall back to attendee status when no transcript exists.
+  if (!sf.hasTranscript) {{
+    const responded = (m.externalResponses || []).filter(
+      s => s !== "declined" && s !== "needsAction"
+    );
+    if (responded.length === 0) {{ skippedCount++; continue; }}
+  }}
+
   const status = sf.hasTranscript ? "✅ Covered" : "❌ Gap";
   if (sf.hasTranscript) coveredCount++; else gapCount++;
 
@@ -489,7 +493,7 @@ for (const m of meetings) {{
   ]);
 }}
 
-return [{{ json: {{ sheetValues, gapCount, coveredCount, totalMeetings: meetings.length }} }}];
+return [{{ json: {{ sheetValues, gapCount, coveredCount, skippedCount, totalMeetings: meetings.length }} }}];
 """,
     },
 }

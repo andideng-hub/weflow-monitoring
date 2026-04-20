@@ -49,12 +49,21 @@ This took a few iterations to get right. The initial filter was too simple (any 
 **v1:** Any attendee with a non-internal email domain counts as external.
 - Problem: Personal Gmail addresses (e.g., a team member's `tamannaguglani@gmail.com` alongside their HG email) triggered false positives. A fully internal "LIVE DEMO" meeting was flagged as having a customer attendee.
 
-**v2 (current):** A meeting is customer-facing only if:
+**v2:** A meeting is customer-facing only if:
 1. At least one attendee has a **corporate** email domain (not internal, not freemail)
 2. At least one of those corporate attendees **accepted** (filters cancelled meetings)
 3. The CSM didn't decline
 
-**Internal domains:** hginsights.com, hgdata.com, trustradius.com, madkudu.com
+**v3 (current — transcript-first):** A meeting is customer-facing if it has ≥1 corporate external attendee. Period. Attendee RSVP status is no longer a pre-filter.
+
+**Why the change:** Rule v2 was hiding real recorded meetings. Over 10 days of data we found 11 Weflow-recorded meetings dropped by the pre-filter because every external forgot to RSVP. Weflow recorded them — they happened — but our alert never surfaced them. Matches the CSM weekly review lifecycle logic: recording wins.
+
+**Attendee status now applies only as a tiebreaker when no transcript exists:**
+- Has Weflow transcript → ✅ Covered (always)
+- No transcript + ≥1 external accepted/tentative → ❌ Gap (real miss)
+- No transcript + all externals declined/needsAction → skip row (effective no-show, meeting didn't happen)
+
+**Internal domains:** hginsights.com, hgdata.com, trustradius.com, madkudu.com, smoothoperator.cc
 **Freemail domains:** gmail.com, yahoo.com, hotmail.com, outlook.com, aol.com, icloud.com, protonmail.com, live.com, me.com, googlemail.com
 
 ### Build Approach

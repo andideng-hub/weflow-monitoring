@@ -8,8 +8,9 @@ Known edge cases observed during operation, and how the workflow handles them.
 |----------|-----------------|
 | Shared meeting on 2+ CSM calendars | Deduplicated by iCalUID; all CSMs listed |
 | Internal meeting with external freemail (e.g. personal Gmail) | Freemail domains excluded from "external" count |
-| All external attendees declined / 0 accepted | Skipped — meeting likely cancelled |
-| CSM declined the meeting | Skipped — CSM didn't attend |
+| All externals declined/needsAction, no transcript | Skipped — effective no-show, meeting didn't happen |
+| All externals declined/needsAction, but Weflow recorded | ✅ Covered — transcript wins; meeting happened regardless of RSVPs |
+| CSM declined but meeting was recorded | ✅ Covered — transcript wins |
 | No customer meetings on a given day | Sends "No CSM customer meetings found" confirmation |
 | Weekend | Cron only runs Mon-Fri |
 
