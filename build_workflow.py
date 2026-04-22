@@ -994,12 +994,31 @@ const sheetValues = $json.sheetValues || [];
 if (sheetValues.length === 0) return [{{ json: {{ sheetValues: [], skipped: 0, appended: 0 }} }}];
 
 const token = $('Refresh Google Token').first().json.access_token;
-const existingResp = await this.helpers.httpRequest({{
-  method: 'GET',
-  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!J:J',
-  headers: {{ Authorization: 'Bearer ' + token }},
-  json: true,
-}});
+
+// Retry on transient 5xx / network errors — Google Sheets occasionally returns 503,
+// which silenced the daily alert on 2026-04-22 (execution 6070).
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function getWithRetry(url, headers) {{
+  const delays = [500, 1500, 4500];
+  let lastErr;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {{
+    try {{
+      return await this.helpers.httpRequest({{ method: 'GET', url, headers, json: true }});
+    }} catch (err) {{
+      const status = err && (err.httpCode || err.statusCode || (err.response && err.response.status));
+      const transient = !status || (Number(status) >= 500 && Number(status) < 600);
+      if (!transient || attempt === delays.length) throw err;
+      lastErr = err;
+      await sleep(delays[attempt]);
+    }}
+  }}
+  throw lastErr;
+}}
+
+const existingResp = await getWithRetry.call(this,
+  'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!J:J',
+  {{ Authorization: 'Bearer ' + token }},
+);
 
 const existing = new Set();
 for (const row of (existingResp.values || []).slice(1)) {{
