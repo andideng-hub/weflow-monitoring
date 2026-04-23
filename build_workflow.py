@@ -774,9 +774,10 @@ function extractMeetingLink(ev) {
   const video = eps.find(e => e.entryPointType === "video");
   if (video && video.uri) return video.uri;
   if (ev.hangoutLink) return ev.hangoutLink;
-  const locMatch = (ev.location || "").match(/https?:\\/\\/[^\\s]+/);
+  const locMatch = (ev.location || "").match(/https?:\\/\\/[^\\s<>]+/);
   if (locMatch) return locMatch[0];
-  const descMatch = (ev.description || "").match(/https?:\\/\\/[^\\s"'<>]+(?:zoom\\.us|meet\\.google\\.com|teams\\.microsoft\\.com|gotomeet\\.me|webex\\.com)[^\\s"'<>]*/i);
+  // Use * (not +) before host so bare hosts like https://zoom.us/j/... match.
+  const descMatch = (ev.description || "").match(/https?:\\/\\/[^\\s"'<>]*(?:zoom\\.us|meet\\.google\\.com|teams\\.microsoft\\.com|gotomeet\\.me|webex\\.com)[^\\s"'<>]*/i);
   if (descMatch) return descMatch[0];
   return "";
 }
