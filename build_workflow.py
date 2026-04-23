@@ -279,7 +279,12 @@ for (let i = 1; i < rows.length; i++) {{
 if (stale.length === 0) return [{{ json: {{ noStale: true, stale: [] }} }}];
 
 const icalIds = stale.map(s => "'" + s.iCalUID.replace(/'/g, "\\\\'") + "'").join(',');
-const soql = `SELECT Id, Weflow__EventId__c, Weflow__Transcript__c, Weflow__RecordingId__c FROM Weflow__WeflowVideoRecording__c WHERE Weflow__EventId__c IN (${{icalIds}})`;
+// Narrow SOQL to meetings within the retry lookback window (cutoff .. today).
+// Prevents recurring-series iCalUIDs from pulling in unrelated old recordings.
+const toSoqlDt = (d) => d.toISOString().replace(/\\.\\d+Z$/, 'Z');
+const earliestUtc = toSoqlDt(new Date(cutoff.getTime() - 86400000));
+const latestUtc = toSoqlDt(new Date(todayPT + 'T07:00:00Z'));
+const soql = `SELECT Id, Weflow__EventId__c, Weflow__StartDateTime__c, Weflow__Transcript__c, Weflow__RecordingId__c FROM Weflow__WeflowVideoRecording__c WHERE Weflow__EventId__c IN (${{icalIds}}) AND Weflow__StartDateTime__c >= ${{earliestUtc}} AND Weflow__StartDateTime__c < ${{latestUtc}}`;
 return [{{ json: {{ noStale: false, stale, soql }} }}];
 """,
     },
@@ -346,21 +351,34 @@ try {{
   const stale = $('Retry: Collect Stale').first().json.stale || [];
   const token = $('Refresh Google Token').first().json.access_token;
 
-  // Map iCalUID → {{recordingId, hasTranscript}}
-  const sfMap = {{}};
+  // Group records by iCalUID (recurring series can return multiple).
+  const sfByUid = {{}};
   for (const r of sfdc) {{
-    const hasT = r.Weflow__Transcript__c !== null && r.Weflow__Transcript__c !== undefined && r.Weflow__Transcript__c !== '';
-    sfMap[r.Weflow__EventId__c] = {{
-      recordingId: r.Id || '',
-      hasTranscript: hasT,
-    }};
+    const eid = r.Weflow__EventId__c;
+    if (!eid) continue;
+    (sfByUid[eid] = sfByUid[eid] || []).push(r);
   }}
 
-  // Find stale rows now covered
+  // Find stale rows now covered. Per-row match by iCalUID AND expected meeting
+  // date: meeting date (PT) = alertDate - 1 day. Prevents recurring-series
+  // collisions from falsely "recovering" gaps via unrelated older recordings.
   const recovered = [];
   for (const s of stale) {{
-    const m = sfMap[s.iCalUID];
-    if (m && m.hasTranscript) recovered.push({{ ...s, recordingId: m.recordingId }});
+    const candidates = sfByUid[s.iCalUID] || [];
+    // Alert date is YYYY-MM-DD. Meeting day (PT) = alertDate - 1 day.
+    // PT midnight = 07:00 UTC during PDT (Apr-Oct).
+    const alertMidnightUtc = new Date(s.alertDate + 'T07:00:00Z').getTime();
+    const meetingDayStart = alertMidnightUtc - 86400000;
+    const meetingDayEnd = alertMidnightUtc;
+    let hit = null;
+    for (const r of candidates) {{
+      const rStart = r.Weflow__StartDateTime__c ? new Date(r.Weflow__StartDateTime__c).getTime() : NaN;
+      if (isNaN(rStart)) continue;
+      if (rStart < meetingDayStart || rStart >= meetingDayEnd) continue;
+      const hasT = r.Weflow__Transcript__c !== null && r.Weflow__Transcript__c !== undefined && r.Weflow__Transcript__c !== '';
+      if (hasT) {{ hit = r; break; }}
+    }}
+    if (hit) recovered.push({{ ...s, recordingId: hit.Id || '' }});
   }}
 
   if (recovered.length === 0) {{
@@ -836,7 +854,14 @@ if (meetings.length === 0) {
   return [{ json: { soql: "", meetingCount: 0, noMeetings: true } }];
 }
 const ids = meetings.map(m => `'${m.iCalUID.replace(/'/g, "\\'")}'`).join(",");
-const soql = `SELECT Id, Name, Weflow__EventId__c, Weflow__Transcript__c FROM Weflow__WeflowVideoRecording__c WHERE Weflow__EventId__c IN (${ids})`;
+// Date-range filter prevents recurring-meeting iCalUID collisions: recurring
+// series reuse the same iCalUID across instances, so matching by iCalUID alone
+// would pull old recordings and falsely mark new instances as ✅ Covered.
+// Bug verified 2026-04-22: Celonis 4/21 matched a 4/7 recording; Lob 4/21
+// matched a 3/31 recording.
+const dr = $('Compute Date Range').first().json;
+const toSoqlDt = (iso) => iso.replace(/\.\d+Z$/, 'Z');
+const soql = `SELECT Id, Name, Weflow__EventId__c, Weflow__StartDateTime__c, Weflow__Transcript__c FROM Weflow__WeflowVideoRecording__c WHERE Weflow__EventId__c IN (${ids}) AND Weflow__StartDateTime__c >= ${toSoqlDt(dr.timeMin)} AND Weflow__StartDateTime__c < ${toSoqlDt(dr.timeMax)}`;
 return [{ json: { soql, meetingCount: meetings.length, noMeetings: false } }];
 """,
     },
@@ -902,17 +927,15 @@ transcript_check_code = {
     "parameters": {
         "mode": "runOnceForAllItems",
         "jsCode": f"""
-// Build lookup: iCalUID -> {{recordingId, hasTranscript}}
+// Build lookup: iCalUID -> array of records (recurring series can return multiple).
 const sfdc = $input.all().map(i => i.json);
-const sfMap = {{}};
+const sfByUid = {{}};
 for (const rec of sfdc) {{
   const records = rec.records || [];
   for (const r of records) {{
     const eid = r.Weflow__EventId__c;
-    const hasTranscript = r.Weflow__Transcript__c !== null &&
-                          r.Weflow__Transcript__c !== undefined &&
-                          r.Weflow__Transcript__c !== "";
-    sfMap[eid] = {{ recordingId: r.Id || "", hasTranscript }};
+    if (!eid) continue;
+    (sfByUid[eid] = sfByUid[eid] || []).push(r);
   }}
 }}
 
@@ -950,7 +973,22 @@ let gapCount = 0, coveredCount = 0, skippedCount = 0;
 const sheetValues = [];
 
 for (const m of meetings) {{
-  const sf = sfMap[m.iCalUID] || {{ recordingId: "", hasTranscript: false }};
+  // Match by iCalUID AND StartDateTime proximity (±2h). Prevents recurring-series
+  // ID collisions from picking up unrelated older recordings.
+  const candidates = sfByUid[m.iCalUID] || [];
+  const mStart = m.startIso ? new Date(m.startIso).getTime() : NaN;
+  let best = null, bestDelta = Infinity;
+  for (const r of candidates) {{
+    const rStart = r.Weflow__StartDateTime__c ? new Date(r.Weflow__StartDateTime__c).getTime() : NaN;
+    if (isNaN(rStart) || isNaN(mStart)) continue;
+    const delta = Math.abs(rStart - mStart);
+    if (delta <= 2 * 60 * 60 * 1000 && delta < bestDelta) {{
+      best = r;
+      bestDelta = delta;
+    }}
+  }}
+  const hasTranscript = !!(best && best.Weflow__Transcript__c !== null && best.Weflow__Transcript__c !== undefined && best.Weflow__Transcript__c !== "");
+  const sf = {{ recordingId: best ? (best.Id || "") : "", hasTranscript }};
 
   // Transcript-first: if Weflow recorded it, the meeting happened. Period.
   // Aligned with csm-weekly-review: needsAction is kept as legitimate pending
