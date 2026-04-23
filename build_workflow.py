@@ -245,7 +245,7 @@ retry_collect_stale = {
 const token = $('Refresh Google Token').first().json.access_token;
 const resp = await this.helpers.httpRequest({{
   method: 'GET',
-  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:L',
   headers: {{ Authorization: 'Bearer ' + token }},
   json: true,
 }});
@@ -405,7 +405,7 @@ try {{
   //    Including CSM avoids collisions when two different meetings share title+date.
   const ilResp = await this.helpers.httpRequest({{
     method: 'GET',
-    url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:E',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:F',
     headers: {{ Authorization: 'Bearer ' + token }},
     json: true,
   }});
@@ -413,7 +413,7 @@ try {{
 
   const mainResp = await this.helpers.httpRequest({{
     method: 'GET',
-    url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:L',
     headers: {{ Authorization: 'Bearer ' + token }},
     json: true,
   }});
@@ -488,7 +488,7 @@ try {{
   // 1. Read main sheet
   const mainResp = await this.helpers.httpRequest({{
     method: 'GET',
-    url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:L',
     headers: {{ Authorization: 'Bearer ' + token }},
     json: true,
   }});
@@ -597,7 +597,7 @@ try {{
   // 5. Delete matching Issue Log rows — match by (title, csms, date), B1 key
   const ilResp = await this.helpers.httpRequest({{
     method: 'GET',
-    url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:E',
+    url: 'https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:F',
     headers: {{ Authorization: 'Bearer ' + token }},
     json: true,
   }});
@@ -768,6 +768,19 @@ function isExternal(email) {
   const d = getDomain(email);
   return !INTERNAL_DOMAINS.includes(d) && !FREEMAIL_DOMAINS.includes(d);
 }
+function extractMeetingLink(ev) {
+  // Priority: conferenceData.entryPoints (video) > hangoutLink > location URL > description regex.
+  const eps = (ev.conferenceData && ev.conferenceData.entryPoints) || [];
+  const video = eps.find(e => e.entryPointType === "video");
+  if (video && video.uri) return video.uri;
+  if (ev.hangoutLink) return ev.hangoutLink;
+  const locMatch = (ev.location || "").match(/https?:\\/\\/[^\\s<>]+/);
+  if (locMatch) return locMatch[0];
+  // Use * (not +) before host so bare hosts like https://zoom.us/j/... match.
+  const descMatch = (ev.description || "").match(/https?:\\/\\/[^\\s"'<>]*(?:zoom\\.us|meet\\.google\\.com|teams\\.microsoft\\.com|gotomeet\\.me|webex\\.com)[^\\s"'<>]*/i);
+  if (descMatch) return descMatch[0];
+  return "";
+}
 
 const seen = {};
 
@@ -825,6 +838,7 @@ for (const item of $input.all()) {
         startIso: ev.start && (ev.start.dateTime || ev.start.date) || "",
         customerDomain: getDomain(firstExt.email || ""),
         externalResponses: external.map(a => a.responseStatus || "needsAction"),
+        meetingLink: extractMeetingLink(ev),
       };
     }
   }
@@ -1011,6 +1025,7 @@ for (const m of meetings) {{
     sf.recordingId,
     m.instanceId,  // unique per recurrence instance
     m.iCalUID,     // SFDC Weflow__EventId__c key — used by Retry: Collect Stale
+    m.meetingLink || "",  // col L: Zoom/Meet/Teams join link from the GCal event
   ]);
 }}
 
@@ -1078,7 +1093,7 @@ sheet_append = {
     "position": pos(2400, -150),
     "parameters": {
         "method": "POST",
-        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K:append",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:L:append",
         "authentication": "none",
         "sendHeaders": True,
         "headerParameters": {
@@ -1119,6 +1134,7 @@ const issueRows = gaps.map(r => [
   r[5],                      // Meeting Title (= summary)
   r[2],                      // CSM names
   r[1].split(" ")[0],        // Meeting Date (date portion of ptDateTime)
+  r[11] || "",               // col F: meeting_link (Zoom/Meet/Teams URL from GCal)
 ]);
 return [{ json: { issueRows, count: issueRows.length } }];
 """,
@@ -1134,7 +1150,7 @@ issue_log_append = {
     "position": pos(2400, -300),
     "parameters": {
         "method": "POST",
-        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:E:append",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{ISSUE_LOG_SHEET_ID}/values/Issues!A:F:append",
         "authentication": "none",
         "sendHeaders": True,
         "headerParameters": {
@@ -1228,7 +1244,7 @@ const token = $('Refresh Google Token').first().json.access_token;
 
 const resp = await this.helpers.httpRequest({{
   method: 'GET',
-  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:K',
+  url: 'https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/Sheet1!A:L',
   headers: {{ Authorization: 'Bearer ' + token }},
   json: true,
 }});
