@@ -331,7 +331,39 @@ retry_sfdc_query = {
                 {"name": "q", "value": "={{ $('Retry: Collect Stale').first().json.soql }}"}
             ]
         },
-        "options": {},
+        # Paginate: SFDC batches SOQL with long-text fields (~24 rows/page).
+        # Without this, records beyond page 1 are silently dropped. See
+        # csm-weekly-review/build_workflow.py for the same fix pattern.
+        "options": {
+            "pagination": {
+                "pagination": {
+                    "paginationMode": "responseContainsNextURL",
+                    "nextURL": "={{ '" + SFDC_URL + "' + $response.body.nextRecordsUrl }}",
+                    "paginationCompleteWhen": "other",
+                    "completeExpression": "={{ $response.body.done === true }}",
+                    "limitPagesFetched": True,
+                    "maxRequests": 20,
+                },
+            },
+        },
+    },
+}
+
+# 4c2. Retry: Flatten SFDC Pages — concatenate paginated items into one
+retry_sfdc_flatten = {
+    "id": "retry_sfdc_flatten",
+    "name": "Retry: Flatten SFDC Pages",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(980, 400),
+    "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": """
+const pages = $input.all().map(i => i.json);
+const records = pages.flatMap(p => p.records || []);
+const totalSize = pages[0]?.totalSize ?? records.length;
+return [{ json: { records, totalSize, done: true, pagesFetched: pages.length } }];
+""",
     },
 }
 
@@ -927,7 +959,37 @@ sfdc_query = {
                 {"name": "q", "value": "={{ $('Build SOQL').first().json.soql }}"}
             ]
         },
-        "options": {},
+        # Paginate — see comment on Retry: SFDC Query for the rationale.
+        "options": {
+            "pagination": {
+                "pagination": {
+                    "paginationMode": "responseContainsNextURL",
+                    "nextURL": "={{ '" + SFDC_URL + "' + $response.body.nextRecordsUrl }}",
+                    "paginationCompleteWhen": "other",
+                    "completeExpression": "={{ $response.body.done === true }}",
+                    "limitPagesFetched": True,
+                    "maxRequests": 20,
+                },
+            },
+        },
+    },
+}
+
+# 22b. Flatten SFDC Pages — concatenate paginated items into one
+sfdc_flatten = {
+    "id": "sfdc_flatten",
+    "name": "Flatten SFDC Pages",
+    "type": "n8n-nodes-base.code",
+    "typeVersion": 2,
+    "position": pos(1900, -50),
+    "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": """
+const pages = $input.all().map(i => i.json);
+const records = pages.flatMap(p => p.records || []);
+const totalSize = pages[0]?.totalSize ?? records.length;
+return [{ json: { records, totalSize, done: true, pagesFetched: pages.length } }];
+""",
     },
 }
 
@@ -1329,6 +1391,7 @@ NODES = [
     retry_collect_stale,
     retry_if_stale,
     retry_sfdc_query,
+    retry_sfdc_flatten,
     retry_apply_updates,
     retry_cleanup_noshows,
     retry_had_error,
@@ -1343,6 +1406,7 @@ NODES = [
     build_soql_code,
     if_has_meetings,
     sfdc_query,
+    sfdc_flatten,
     transcript_check_code,
     dedup_rows_code,
     sheet_append,
@@ -1373,7 +1437,8 @@ CONNECTIONS = {
         [{"node": "Retry: SFDC Query", "type": "main", "index": 0}],
         [],  # noStale=false branch: dead end
     ]},
-    "Retry: SFDC Query": {"main": [[{"node": "Retry: Apply Updates", "type": "main", "index": 0}]]},
+    "Retry: SFDC Query": {"main": [[{"node": "Retry: Flatten SFDC Pages", "type": "main", "index": 0}]]},
+    "Retry: Flatten SFDC Pages": {"main": [[{"node": "Retry: Apply Updates", "type": "main", "index": 0}]]},
     "Retry: Apply Updates": {"main": [[{"node": "Retry: Had Error?", "type": "main", "index": 0}]]},
     "Retry: Had Error?": {"main": [
         [{"node": "Retry: Format Error Slack", "type": "main", "index": 0}],
@@ -1429,6 +1494,9 @@ CONNECTIONS["Has Meetings?"] = {
     ]
 }
 CONNECTIONS["SFDC Weflow Query"] = {
+    "main": [[{"node": "Flatten SFDC Pages", "type": "main", "index": 0}]]
+}
+CONNECTIONS["Flatten SFDC Pages"] = {
     "main": [[{"node": "Transcript Check", "type": "main", "index": 0}]]
 }
 # Transcript Check fans out: dedup→sheet append + slack format + issue log funnel (parallel)
