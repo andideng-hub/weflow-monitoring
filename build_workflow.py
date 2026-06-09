@@ -51,7 +51,7 @@ with open(google_creds_path) as f:
 # Shared filter constants (C1/S1) — single source of truth across weflow-monitoring
 # and csm-weekly-review. Any domain add/remove goes in this one JSON file.
 FILTER_CONSTANTS = json.load(open(
-    "/Users/andi.deng/Desktop/andi-ai/data/config/meeting-filter-constants.json"
+    "/Users/andi.deng/Desktop/andi-brain/data/config/meeting-filter-constants.json"
 ))
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -788,7 +788,7 @@ filter_dedup_code = {
         "mode": "runOnceForAllItems",
         "jsCode": """
 // C1/S1: INTERNAL_DOMAINS + FREEMAIL_DOMAINS loaded from shared JSON config
-// at /Users/andi.deng/Desktop/andi-ai/data/config/meeting-filter-constants.json
+// at /Users/andi.deng/Desktop/andi-brain/data/config/meeting-filter-constants.json
 // so weflow-monitoring and csm-weekly-review stay in sync.
 const INTERNAL_DOMAINS = """ + json.dumps(FILTER_CONSTANTS["INTERNAL_DOMAINS"]) + """;
 const FREEMAIL_DOMAINS = """ + json.dumps(FILTER_CONSTANTS["FREEMAIL_DOMAINS"]) + """;
