@@ -12,7 +12,7 @@ from pathlib import Path
 # ── Load credentials ──────────────────────────────────────────────────────────
 
 env = {}
-for line in Path("/Users/andi.deng/Desktop/andi-ai/.env").read_text().splitlines():
+for line in (Path.home() / ".config" / "andi" / ".env").read_text().splitlines():
     if "=" in line and not line.startswith("#"):
         k, _, v = line.partition("=")
         env[k.strip()] = v.strip()
